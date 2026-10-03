@@ -1,0 +1,5 @@
+[functions.bootstrap-first-admin]
+verify_jwt = false
+
+[functions.create-staff-account]
+verify_jwt = true
