@@ -1040,7 +1040,8 @@
       'invoices',
       'customers',
       'products',
-      'stockhistory'
+      'stockhistory',
+      'settings'
     ];
 
     document.querySelectorAll('.nav-item[data-page]').forEach(item => {
@@ -1059,7 +1060,8 @@
       }
     });
 
-    // Remove legacy warehouse and approval navigation.
+    // Remove legacy warehouse and approval navigation until their server
+    // operations are backed by the confirmed demo schema.
     [
       'nav-warehouse',
       'nav-warehouses',
