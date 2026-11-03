@@ -72,14 +72,14 @@ Deno.serve(async (req) => {
   const { data: callerProfile, error: callerError } =
     await authClient
       .from('profiles')
-      .select('role, active')
+      .select('role, is_active')
       .eq('id', userData.user.id)
       .single();
 
   if (
     callerError ||
     !callerProfile ||
-    callerProfile.active === false ||
+    callerProfile.is_active === false ||
     callerProfile.role !== 'admin'
   ) {
     return json({
@@ -172,7 +172,7 @@ Deno.serve(async (req) => {
       full_name: fullName,
       role,
       location,
-      active: true,
+      is_active: true,
       must_change_password: true
     };
 
@@ -181,7 +181,7 @@ Deno.serve(async (req) => {
         .from('profiles')
         .upsert(upsertPayload)
         .select(
-          'id, email, username, full_name, role, location, active, must_change_password'
+          'id, email, username, full_name, role, location, is_active, must_change_password'
         )
         .single();
 
