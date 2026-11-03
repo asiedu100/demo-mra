@@ -412,9 +412,15 @@
 
       const profile = await getProfile(userId);
 
-      if (!profile || profile.is_active === false) {
+      if (!profile) {
         throw new Error(
-          'Your account is inactive or your profile does not exist.'
+          'Your account profile could not be found. Contact your administrator.'
+        );
+      }
+
+      if (profile.is_active === false) {
+        throw new Error(
+          'Your account is inactive. Tell your administrator to activate your account.'
         );
       }
 
@@ -838,7 +844,7 @@
     showAuthScreen();
 
     toast(
-      'Your account is inactive. Contact your administrator.',
+      'Your account is inactive. Tell your administrator to activate your account.',
       'error'
     );
   }
