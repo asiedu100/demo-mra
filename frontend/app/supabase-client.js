@@ -898,7 +898,7 @@
   async function loadInvoices() {
     const sb = requireClient();
 
-    const [{ data, error }, { data: profiles }] = await Promise.all([
+    const [{ data, error }, { data: profiles, error: profilesError }] = await Promise.all([
       sb
         .from('invoices')
         .select(INVOICE_SELECT)
@@ -909,6 +909,7 @@
     ]);
 
     if (error) throw error;
+    if (profilesError) throw profilesError;
 
     const profileNames = Object.fromEntries(
       (profiles || []).map(profile => [profile.id, profile.full_name])
@@ -920,7 +921,7 @@
   async function loadInvoiceById(id) {
     const sb = requireClient();
 
-    const [{ data, error }, { data: profiles }] = await Promise.all([
+    const [{ data, error }, { data: profiles, error: profilesError }] = await Promise.all([
       sb
         .from('invoices')
         .select(INVOICE_SELECT)
@@ -932,6 +933,7 @@
     ]);
 
     if (error) throw error;
+    if (profilesError) throw profilesError;
 
     const profileNames = Object.fromEntries(
       (profiles || []).map(profile => [profile.id, profile.full_name])

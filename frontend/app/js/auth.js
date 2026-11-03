@@ -264,21 +264,34 @@
       auditLogs: LS.get('lumoda_audit') || []
     };
 
-    const [
-      products,
-      customers,
-      invoices,
-      stockHistory,
-      auditLogs,
-      businessSettings
-    ] = await Promise.all([
-      safeLoad(() => api.loadProducts(), cached.products),
-      safeLoad(() => api.loadCustomers(), cached.customers),
-      safeLoad(() => api.loadInvoices(), cached.invoices),
-      safeLoad(() => api.loadStockHistory(), cached.stockHistory),
-      safeLoad(() => api.loadAuditLogs(), cached.auditLogs),
-      safeLoad(() => api.loadBusinessSettings(), null)
-    ]);
+    const loaders = [
+      ['products', () => api.loadProducts(), cached.products],
+      ['customers', () => api.loadCustomers(), cached.customers],
+      ['invoices', () => api.loadInvoices(), cached.invoices],
+      ['stock history', () => api.loadStockHistory(), cached.stockHistory],
+      ['audit logs', () => api.loadAuditLogs(), cached.auditLogs]
+    ];
+    const warnings = [];
+    const results = await Promise.all(loaders.map(async ([label, loader, fallback]) => {
+      try {
+        const value = await loader();
+        if (Array.isArray(value) && value.length === 0 && fallback.length > 0) {
+          console.warn(`MRA ${label} query returned no rows; keeping cached data.`);
+          warnings.push(`${label} returned no rows`);
+          return fallback;
+        }
+        return value;
+      } catch (error) {
+        console.error(`MRA ${label} query failed:`, error);
+        warnings.push(`${label} could not be refreshed`);
+        return fallback;
+      }
+    }));
+    const [products, customers, invoices, stockHistory, auditLogs] = results;
+    const businessSettings = await safeLoad(
+      () => api.loadBusinessSettings(),
+      null
+    );
 
     // Prevent data fetched for a previous user from overwriting
     // the current user's data.
@@ -469,7 +482,10 @@
         console.warn('Login audit warning:', auditError);
       }
 
-      await syncSupabaseCache();
+      const syncResult = await syncSupabaseCache();
+      if (syncResult?.warnings?.length) {
+        toast('Some data could not be refreshed. Saved data was preserved.', 'error');
+      }
 
       if (typeof setAutoLoginAllowed === 'function') {
         setAutoLoginAllowed(!!rememberInput?.checked);
@@ -598,7 +614,10 @@
       authGeneration++;
 
       await initializeUserBranches();
-      await syncSupabaseCache();
+      const syncResult = await syncSupabaseCache();
+      if (syncResult?.warnings?.length) {
+        toast('Some data could not be refreshed. Saved data was preserved.', 'error');
+      }
 
       if (authUser.user_metadata?.must_change_password === true) {
         showChangePwScreen();
@@ -689,6 +708,8 @@
         );
       }
     }
+    window.mraDataSyncWarnings = warnings;
+    return { warnings };
   }
 
   // ----------------------------------------------------------
