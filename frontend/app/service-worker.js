@@ -9,7 +9,7 @@
 //
 // Bump CACHE_NAME whenever the shell file list below changes so old caches
 // get cleared out on the next activate.
-const CACHE_NAME = 'mra-shell-v21';
+const CACHE_NAME = 'mra-shell-v22';
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
 
 const APP_SHELL = [
@@ -21,7 +21,7 @@ const APP_SHELL = [
   './supabase-client.js',
   './warehouse.js',
   './js/core.js?v=5',
-  './js/auth.js?v=8',
+  './js/auth.js?v=9',
   './js/admin.js?v=3',
   '../MRA.png?v=2',
   './js/invoice-domain.js?v=1',
