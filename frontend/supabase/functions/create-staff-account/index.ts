@@ -168,12 +168,9 @@ Deno.serve(async (req) => {
     const upsertPayload = {
       id: createdUser.user.id,
       email,
-      username,
       full_name: fullName,
       role,
-      location,
-      is_active: true,
-      must_change_password: true
+      is_active: true
     };
 
     const { data: profileData, error: profileError } =
@@ -181,7 +178,7 @@ Deno.serve(async (req) => {
         .from('profiles')
         .upsert(upsertPayload)
         .select(
-          'id, email, username, full_name, role, location, is_active, must_change_password'
+          'id, email, full_name, role, is_active'
         )
         .single();
 
