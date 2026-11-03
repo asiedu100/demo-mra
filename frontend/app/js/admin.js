@@ -235,7 +235,7 @@ function openChangeMyPassword(){
 }
 function saveMyPassword(){
   const np=document.getElementById('my-new-pw').value; const cp=document.getElementById('my-confirm-pw').value; const err=document.getElementById('my-pw-error'); err.style.display='none';
-  if(np.length<6){err.textContent='Minimum 6 characters.';err.style.display='block';return;}
+  if(np.length<8){err.textContent='Minimum 8 characters.';err.style.display='block';return;}
   if(np!==cp){err.textContent='Passwords do not match.';err.style.display='block';return;}
   if (window.LumodaSupabase && window.LumodaSupabase.isConfigured()) {
     (async () => {

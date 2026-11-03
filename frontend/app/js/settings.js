@@ -25,6 +25,12 @@ async function renderSettings() {
 
   const bizCard = document.getElementById('business-settings-card');
   const backupCard = document.getElementById('backup-settings-card');
+
+  const profileName = document.getElementById('set-profile-name');
+  const profileEmail = document.getElementById('set-profile-email');
+  if (profileName) profileName.value = currentUser?.fullName || '';
+  if (profileEmail) profileEmail.value = currentUser?.email || '';
+
   if (!isAdmin()) {
     if (bizCard) bizCard.style.display = 'none';
     if (backupCard) backupCard.style.display = 'none';
@@ -32,11 +38,6 @@ async function renderSettings() {
   }
   if (bizCard) bizCard.style.display = '';
   if (backupCard) backupCard.style.display = '';
-
-  const profileName = document.getElementById('set-profile-name');
-  const profileEmail = document.getElementById('set-profile-email');
-  if (profileName) profileName.value = currentUser?.fullName || '';
-  if (profileEmail) profileEmail.value = currentUser?.email || '';
 
   try {
     const settings = await window.LumodaSupabase.loadBusinessSettings();
