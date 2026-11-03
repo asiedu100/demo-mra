@@ -509,8 +509,7 @@ function navigate(page, element) {
   const adminOnlyPages = [
     'reports',
     'audit',
-    'users',
-    'settings'
+    'users'
   ];
 
   if (adminOnlyPages.includes(page) && !isAdmin()) {
