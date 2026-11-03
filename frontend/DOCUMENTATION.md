@@ -1,6 +1,6 @@
-# Lumoda Enterprise — System Documentation
+# MRA Systems — System Documentation
 
-> Business system for **Lumoda Enterprise (Maa Lucy's Place)**, a wholesale & retail kitchenware
+> Business system for **MRA Systems**, a wholesale & retail kitchenware
 > business with two branches in Kumasi, Ghana (**Alabar** and **Morocco (K.O)**).
 
 This document describes what the system is made of, how the pieces fit together, and where to
@@ -11,12 +11,13 @@ docs already in the repo — see [Related Documents](#related-documents).
 
 ## 1. Overview
 
-The codebase contains **two separate web apps that share one Supabase backend**:
+The codebase contains the MRA staff app and retained legacy storefront assets that
+are no longer exposed from the public root:
 
 | App | Location | Audience | Purpose |
 |---|---|---|---|
-| **Storefront** | repo root (`index.html`, `site.js`, `site.css`) | Public / customers | Marketing site: product gallery, top sellers, contact & location info, WhatsApp ordering |
-| **Staff App** | [app/](app/) (`index.html`, `js/*.js`, `warehouse.js`, `styles.css`) | Staff & admins | Installable PWA "Business Management Suite" — sales, invoicing, customers, inventory, warehouse, users, audit log |
+| **Legacy storefront assets** | repo root (`site.js`, `site.css`, `images/`) | Not deployed from `/` | Retained for migration/reference; the root entry point redirects to `/app/` |
+| **MRA Staff App** | [app/](app/) (`index.html`, `js/*.js`, `warehouse.js`, `styles.css`) | Staff & admins | Installable PWA business-management suite — sales, invoicing, customers, inventory, warehouse, users, audit log |
 
 Both are plain HTML/CSS/JavaScript (no build step, no framework, no bundler). The staff app talks
 to **Supabase** (Postgres + Auth + Edge Functions) for authentication and, increasingly, for data —
@@ -263,3 +264,12 @@ RLS blocks unauthenticated access before going live.
   approvals and a full audit journal) is designed but not yet implemented — see
   [WAREHOUSE_V2_PLAN.md](WAREHOUSE_V2_PLAN.md).
 - No automated tests or CI configuration exist in the repo at this time.
+# MRA Systems transaction reliability
+
+Invoice creation is server-authoritative through the deployed `create_invoice`
+RPC. The browser also creates one client transaction reference per form attempt
+and blocks accidental repeat submissions in the same form. The database now has
+a `client_ref` uniqueness foundation, but the deployed branch-based RPC must be
+updated with that parameter before retries can be deduplicated across tabs,
+devices, or lost network responses. Confirm the exact staging RPC signature
+before adding the server-side wrapper.

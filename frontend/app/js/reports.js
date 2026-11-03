@@ -1,16 +1,39 @@
 // ============================================================
 // REPORTS
 // ============================================================
-let reportsInvoicesCache=[];
-let reportsSalesCache=[];
-let topCustomersSortMode='spend';
 // invoicesOnly (named customers) vs allSales (invoices + walk-in cash sales):
 // cash sales carry no real customer identity (just an auto "Walk-in - <time>"
 // name), so Top Customers and the Cash/MoMo split inside Payment Breakdown
 // stay invoices-only to avoid meaningless entries / double-counting — every
 // other figure here should reflect true total revenue, so it gets allSales.
 function renderReports(){if(!isAdmin())return;const invoicesOnly=filterByLoc(getInvoices());const cashSales=filterByLoc(getCashSales());const allSales=invoicesOnly.concat(cashSales);reportsInvoicesCache=invoicesOnly;reportsSalesCache=allSales;const now=new Date();const today=startOfLocalDay(now);const weekStart=startOfWeek(now);const nextWeek=new Date(weekStart);nextWeek.setDate(nextWeek.getDate()+7);const prevWeek=new Date(weekStart);prevWeek.setDate(prevWeek.getDate()-7);const monthStart=new Date(now.getFullYear(),now.getMonth(),1);const todayTotal=sumInvoiceTotal(allSales.filter(i=>asTimestamp(i.createdAt)>=today));const weekTotal=sumInvoiceTotal(allSales.filter(i=>{const t=asTimestamp(i.createdAt);return t>=weekStart&&t<nextWeek;}));const lastWeekTotal=sumInvoiceTotal(allSales.filter(i=>{const t=asTimestamp(i.createdAt);return t>=prevWeek&&t<weekStart;}));const monthTotal=sumInvoiceTotal(allSales.filter(i=>asTimestamp(i.createdAt)>=monthStart));const allTotal=sumInvoiceTotal(allSales);document.getElementById('rep-today').textContent=fmtGHS(todayTotal);document.getElementById('rep-week').textContent=fmtGHS(weekTotal);document.getElementById('rep-last-week').textContent=fmtGHS(lastWeekTotal);document.getElementById('rep-week-delta').innerHTML=weekComparisonLabel(weekTotal,lastWeekTotal);document.getElementById('rep-month').textContent=fmtGHS(monthTotal);document.getElementById('rep-alltime').textContent=fmtGHS(allTotal);renderPaymentBreakdown(invoicesOnly,cashSales);renderLocationBreakdown(allSales);renderTopProducts(allSales);renderMonthlyChart(allSales);renderTopCustomers(invoicesOnly,topCustomersSortMode);const dayPicker=document.getElementById('rep-day-picker');if(dayPicker&&!dayPicker.value){const d=new Date();dayPicker.value=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}renderSalesByDay();}
-function renderPaymentBreakdown(invoices,cashSales){const paid=invoices.filter(i=>i.status==='paid');const cash=paid.filter(i=>i.payMethod==='cash').reduce((s,i)=>s+i.total,0);const momo=paid.filter(i=>i.payMethod==='momo').reduce((s,i)=>s+i.total,0);const uns=paid.filter(i=>!i.payMethod).reduce((s,i)=>s+i.total,0);const cashSalesTotal=(cashSales||[]).reduce((s,i)=>s+i.total,0);document.getElementById('payment-breakdown').innerHTML='<div style="display:grid;gap:8px"><div class="stat-card" style="padding:10px"><div class="stat-label">💵 Cash Sales (walk-in)</div><div class="stat-value" style="font-size:18px">'+fmtGHS(cashSalesTotal)+'</div></div><div class="stat-card" style="padding:10px"><div class="stat-label">Cash (from invoices)</div><div class="stat-value" style="font-size:18px">'+fmtGHS(cash)+'</div></div><div class="stat-card" style="padding:10px"><div class="stat-label">Mobile Money</div><div class="stat-value" style="font-size:18px">'+fmtGHS(momo)+'</div></div><div class="stat-card" style="padding:10px"><div class="stat-label">Unspecified Paid</div><div class="stat-value" style="font-size:18px">'+fmtGHS(uns)+'</div></div></div>';}
+function reportPaymentRows(invoice){
+  if(Array.isArray(invoice.payments)&&invoice.payments.length)return invoice.payments;
+  if(Array.isArray(invoice.invoice_payments)&&invoice.invoice_payments.length)return invoice.invoice_payments;
+  const paid=Number(invoice.amountPaid??invoice.amount_paid??0);
+  if(paid<=0)return [];
+  return [{amount:paid,method:invoice.payMethod??invoice.pay_method??invoice.payment_method??''}];
+}
+function reportPaymentAmount(invoice,method){
+  return reportPaymentRows(invoice).reduce((sum,payment)=>{
+    const paymentMethod=String(payment.method??payment.payment_method??payment.paymentMethod??'').toLowerCase();
+    return paymentMethod===method ? sum+Number(payment.amount||0) : sum;
+  },0);
+}
+function renderPaymentBreakdown(invoices,cashSales){
+  const cash=(invoices||[]).reduce((sum,invoice)=>sum+reportPaymentAmount(invoice,'cash'),0);
+  const momo=(invoices||[]).reduce((sum,invoice)=>sum+reportPaymentAmount(invoice,'momo'),0);
+  const uns=(invoices||[]).reduce((sum,invoice)=>{
+    const known=reportPaymentAmount(invoice,'cash')+reportPaymentAmount(invoice,'momo');
+    const paid=Number(invoice.amountPaid??invoice.amount_paid??0);
+    return sum+Math.max(0,paid-known);
+  },0);
+  const cashSalesTotal=(cashSales||[]).reduce((sum,invoice)=>{
+    const paid=Number(invoice.amountPaid??invoice.amount_paid??invoice.total??0);
+    return sum+(paid||Number(invoice.total||0));
+  },0);
+  document.getElementById('payment-breakdown').innerHTML='<div style="display:grid;gap:8px"><div class="stat-card" style="padding:10px"><div class="stat-label">💵 Cash Sales (walk-in)</div><div class="stat-value" style="font-size:18px">'+fmtGHS(cashSalesTotal)+'</div></div><div class="stat-card" style="padding:10px"><div class="stat-label">Cash (from invoices)</div><div class="stat-value" style="font-size:18px">'+fmtGHS(cash)+'</div></div><div class="stat-card" style="padding:10px"><div class="stat-label">Mobile Money (invoices)</div><div class="stat-value" style="font-size:18px">'+fmtGHS(momo)+'</div></div><div class="stat-card" style="padding:10px"><div class="stat-label">Unspecified Paid</div><div class="stat-value" style="font-size:18px">'+fmtGHS(uns)+'</div></div></div>';
+}
 function renderLocationBreakdown(invoices){const locs=LOCATIONS;document.getElementById('location-breakdown').innerHTML=locs.map(l=>{const arr=invoices.filter(i=>i.location===l);return '<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--gray-100)"><span>'+l+'</span><strong>'+fmtGHS(sumInvoiceTotal(arr))+'</strong><span class="mono" style="color:var(--gray-400)">'+arr.length+' inv</span></div>';}).join('');}
 function renderTopProducts(invoices){const map={};invoices.forEach(inv=>inv.items.forEach(it=>{map[it.name]=(map[it.name]||0)+it.total;}));const top=Object.entries(map).sort((a,b)=>b[1]-a[1]).slice(0,5);document.getElementById('top-products').innerHTML=top.length?top.map(([n,t],i)=>'<div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--gray-100)"><span>'+(i+1)+'. '+escapeHtml(n)+'</span><strong>'+fmtGHS(t)+'</strong></div>').join(''):'<div style="color:var(--gray-400);font-size:13px">No product sales yet</div>';}
 function renderMonthlyChart(invoices){const months=[];const now=new Date();for(let i=5;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1);const next=new Date(d.getFullYear(),d.getMonth()+1,1);const total=invoices.filter(inv=>{const t=asTimestamp(inv.createdAt);return t>=d&&t<next;}).reduce((s,inv)=>s+inv.total,0);months.push({label:d.toLocaleDateString('en',{month:'short'}),total});}const max=Math.max(...months.map(m=>m.total),1);document.getElementById('monthly-chart').innerHTML=months.map(m=>{const h=Math.round(m.total/max*120);return '<div class="chart-bar-wrap"><div style="font-size:9px;color:var(--gray-400);font-family:var(--font-mono)">'+(m.total>0?'GH₵'+Math.round(m.total):'')+'</div><div class="chart-bar" style="height:'+h+'px"></div><div class="chart-bar-label">'+m.label+'</div></div>';}).join('');}
@@ -53,4 +76,3 @@ function switchTopCustomersSort(mode,btn){
   if(btn){btn.classList.remove('btn-secondary');btn.classList.add('btn-primary');}
   renderTopCustomers(reportsInvoicesCache,topCustomersSortMode);
 }
-

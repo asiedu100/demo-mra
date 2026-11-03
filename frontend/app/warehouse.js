@@ -11,7 +11,6 @@
 // ============================================================
 let lowStockPage      = 15;   // how many low stock items currently showing
 let balancePage       = 20;   // how many balance rows currently showing
-let balanceSearch     = '';   // search filter for stock balance table
 
 const LOW_STOCK_PAGE_SIZE  = 15;
 const BALANCE_PAGE_SIZE    = 20;
@@ -273,7 +272,6 @@ function switchWarehouse(id) {
 // ============================================================
 // MOVEMENT FILTERS
 // ============================================================
-let warehouseMovementFilter = { search: '', type: 'all', status: 'all' };
 
 function updateWarehouseMovementFilter(field, value) {
   warehouseMovementFilter[field] = value;
@@ -813,7 +811,6 @@ async function renderWarehouse() {
 // ============================================================
 // WAREHOUSE LOCATIONS (admin) — add/edit warehouses, assign staff
 // ============================================================
-let editingWarehouseId = null;
 
 // getUsers()/lumoda_users is a local-only-mode cache that's never kept in
 // sync with real Supabase accounts (only the Users admin page fetches live
@@ -978,7 +975,6 @@ async function toggleWarehouseStaffAssignment(profileId, checked) {
 // admin-only gate, matching the already-open RLS and the standing rule that
 // nothing here should wait on an admin who may be unreachable for months.
 // ============================================================
-let editingSupplierId = null;
 
 function renderWarehouseSuppliers() {
   const container = document.getElementById('wh-suppliers-container');
@@ -1629,7 +1625,6 @@ async function saveWarehouseStockOut() {
 // comes from every active warehouse, not just ones the manager is assigned
 // to (see 20260805101500_warehouse_transfers.sql).
 // ============================================================
-let warehouseTransferItems = [];
 
 function openWarehouseTransferModal() {
   if (!requireActiveWarehouse()) return;

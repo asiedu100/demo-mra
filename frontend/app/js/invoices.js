@@ -1,1560 +1,1431 @@
 // ============================================================
-// FIX #2: Refresh datalists in all open line item rows
-// Called after any product is added/edited or cache synced
+// MRA SYSTEMS — INVOICES
+// Uses the MRA Supabase database as the source of truth.
+// Financial transactions must go through secure database RPCs.
 // ============================================================
+
+
+window._invoiceMode = 'invoice';
+window._selectedPayMethod = '';
+window._invoicePriceType = 'standard';
+
+// ------------------------------------------------------------
+// SHARED HELPERS
+// ------------------------------------------------------------
+
+function invoiceAPI() {
+  return window.MRAApi || window.MRASupabase || window.LumodaSupabase || null;
+}
+
+function invoiceEscape(value) {
+  if (typeof escapeHtml === 'function') return escapeHtml(value);
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[char]);
+}
+
+function invoiceMoney(value) {
+  const amount = Number(value || 0);
+  return typeof fmtGHS === 'function'
+    ? fmtGHS(amount)
+    : 'GH₵ ' + amount.toFixed(2);
+}
+
+function invoiceValue(obj, ...keys) {
+  for (const key of keys) {
+    if (obj && obj[key] !== undefined && obj[key] !== null) {
+      return obj[key];
+    }
+  }
+  return null;
+}
+
+function invoiceId(inv) {
+  return invoiceValue(inv, 'id');
+}
+
+function invoiceNumber(inv) {
+  return invoiceValue(inv, 'number', 'invoice_number') || '—';
+}
+
+function invoiceCustomerName(inv) {
+  return invoiceValue(inv, 'customerName', 'customer_name') || 'Walk-in Customer';
+}
+
+function invoiceBranchId(inv) {
+  return invoiceValue(inv, 'branch_id', 'branchId');
+}
+
+function invoiceBranchName(inv) {
+  const branchId = invoiceBranchId(inv);
+  const branch = typeof getBranchById === 'function'
+    ? getBranchById(branchId)
+    : null;
+
+  return branch
+    ? branch.branch_name || branch.branchName || branch.name
+    : invoiceValue(inv, 'branch_name', 'branchName', 'location') || 'Unknown branch';
+}
+
+function invoiceTotal(inv) {
+  return Number(invoiceValue(inv, 'total', 'total_amount') || 0);
+}
+
+function invoiceSubtotal(inv) {
+  return Number(invoiceValue(inv, 'subtotal') ?? invoiceTotal(inv));
+}
+
+function invoiceDiscount(inv) {
+  return Number(invoiceValue(inv, 'discount', 'discount_amount') || 0);
+}
+
+function invoicePaid(inv) {
+  return Number(invoiceValue(inv, 'amountPaid', 'amount_paid') || 0);
+}
+
+function invoiceBalance(inv) {
+  const supplied = invoiceValue(inv, 'balanceDue', 'balance_due');
+  return supplied !== null
+    ? Number(supplied)
+    : Math.max(0, invoiceTotal(inv) - invoicePaid(inv));
+}
+
+function invoiceStatus(inv) {
+  return String(invoiceValue(inv, 'status') || 'pending').toLowerCase();
+}
+
+function invoiceDate(inv) {
+  return invoiceValue(inv, 'createdAt', 'created_at', 'invoice_date', 'invoiceDate');
+}
+
+function invoiceItems(inv) {
+  const items = invoiceValue(inv, 'items', 'invoice_items');
+  if (!Array.isArray(items)) return [];
+
+  return items.map(item => {
+    const quantity = Number(invoiceValue(item, 'qty', 'quantity') || 0);
+    const price = Number(invoiceValue(item, 'price', 'unit_price') || 0);
+
+    return {
+      id: item.id,
+      productId: invoiceValue(item, 'product_id', 'productId'),
+      name: invoiceValue(item, 'name', 'product_name', 'productName') || 'Product',
+      sku: item.sku || '',
+      qty: quantity,
+      price,
+      total: Number(invoiceValue(item, 'total', 'line_total') ?? quantity * price)
+    };
+  });
+}
+
+function invoicePayments(inv) {
+  const payments = invoiceValue(inv, 'payments', 'invoice_payments');
+  return Array.isArray(payments) ? payments : [];
+}
+
+function getInvoiceById(id) {
+  const invoices = typeof getAllInvoices === 'function'
+    ? uniqueInvoices(getAllInvoices())
+    : getInvoices();
+
+  return invoices.find(inv => String(invoiceId(inv)) === String(id));
+}
+
+function uniqueInvoices(invoices) {
+  const seen = new Set();
+
+  return (invoices || []).filter(invoice => {
+    const id = invoiceId(invoice);
+    if (!id) return true;
+
+    const key = String(id);
+    if (seen.has(key)) return false;
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function invoiceCanBeViewed(inv) {
+  if (!inv) return false;
+  if (typeof canEditInvoice === 'function') return canEditInvoice(inv);
+
+  if (typeof isAdmin === 'function' && isAdmin()) return true;
+
+  const branchIds = currentUser?.branchIds || [];
+  return branchIds.includes(invoiceBranchId(inv));
+}
+
+function invoiceToast(message, type) {
+  if (typeof toast === 'function') toast(message, type);
+  else alert(message);
+}
+
+function invoiceRefresh() {
+  if (typeof syncSupabaseCache === 'function') {
+    return syncSupabaseCache();
+  }
+  return Promise.resolve();
+}
+
+// ------------------------------------------------------------
+// PRODUCT DATALISTS
+// ------------------------------------------------------------
+
 function refreshAllLineItemDataLists() {
-  const products = getProducts();
-  const opts = products.map(p => '<option value="' + escAttr(p.name) + '">').join('');
+  const products = typeof getProducts === 'function' ? getProducts() : [];
 
-  // Refresh new invoice modal line items
-  document.querySelectorAll('#line-items-body .line-item-row').forEach(row => {
-    const dl = row.querySelector('datalist');
-    if (dl) dl.innerHTML = opts;
+  const opts = products
+    .filter(p => p.is_active !== false && p.isActive !== false)
+    .map(p => {
+      const name = p.product_name || p.name || '';
+      return '<option value="' + invoiceEscape(name) + '">';
+    })
+    .join('');
+
+  document.querySelectorAll(
+    '#line-items-body .line-item-row datalist, #edit-items-container .line-item-row datalist'
+  ).forEach(list => {
+    list.innerHTML = opts;
   });
 
-  // Refresh edit invoice modal line items
-  document.querySelectorAll('#edit-items-container .line-item-row').forEach(row => {
-    const dl = row.querySelector('datalist');
-    if (dl) dl.innerHTML = opts;
-  });
-
-  // Also refresh the global product-list datalist if it exists
   const globalList = document.getElementById('product-list');
   if (globalList) globalList.innerHTML = opts;
 }
 
-// ============================================================
-// CUSTOMER TYPE SELECTOR — sets price type for ALL line items
-// ============================================================
-function selectCustomerType(type) {
-  // Sets the default for any new row added afterward, and bulk-applies to
-  // every row currently on the invoice (each row can still be individually
-  // changed afterward via its own sale-type select).
-  window._invoicePriceType = type;
-  _updateCustomerTypePills(type);
-  document.querySelectorAll('#line-items-body .line-item-row').forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    const name   = inputs[0].value.trim();
-    const pi     = inputs[2];
-    const sel    = row.querySelector('select');
-    if (sel) sel.value = type;
-    const product = getProducts().find(p => p.name.toLowerCase() === name.toLowerCase());
-    if (product) {
-      pi.removeAttribute('readonly');
-      pi.value = Number(productPriceForType(product, type)).toFixed(2);
-      pi.setAttribute('readonly', '');
-    }
-  });
-  calcTotal();
-}
-
-function _updateCustomerTypePills(type) {
-  const on  = 'flex:1;padding:9px;border:2px solid var(--accent);border-radius:var(--radius);background:#fdf5ef;cursor:pointer;font-size:13px;font-weight:600;text-align:center;color:var(--accent)';
-  const off = 'flex:1;padding:9px;border:1px solid var(--gray-200);border-radius:var(--radius);background:var(--white);cursor:pointer;font-size:13px;font-weight:500;text-align:center;color:var(--gray-600)';
-  const rEl = document.getElementById('ctype-retail');
-  const wEl = document.getElementById('ctype-wholesale');
-  const cEl = document.getElementById('ctype-carton');
-  if (rEl) rEl.style.cssText = type === 'retail'    ? on : off;
-  if (wEl) wEl.style.cssText = type === 'wholesale' ? on : off;
-  if (cEl) cEl.style.cssText = type === 'carton'    ? on : off;
-}
-
-// ============================================================
-// INVOICES
-// ============================================================
-let invoiceFilter = { text:'', status:'' };
-
-const PUBLIC_SITE_URL = 'https://lumoda.netlify.app';
-
-function receiptQrMarkup() {
-  let qrDataUrl = '';
-  try {
-    if (typeof qrcode === 'function') {
-      const qr = qrcode(0, 'M');
-      qr.addData(PUBLIC_SITE_URL);
-      qr.make();
-      qrDataUrl = qr.createDataURL(4, 2);
-    }
-  } catch (error) {
-    console.warn('Could not generate receipt QR code:', error);
-  }
-
-  return '<div style="margin:16px auto 0;text-align:center;font-size:11px;color:#666;page-break-inside:avoid">' +
-    '<div style="font-weight:700;margin-bottom:6px">Scan to visit our website</div>' +
-    (qrDataUrl
-      ? '<img src="'+escapeHtml(qrDataUrl)+'" alt="QR code for '+escapeHtml(PUBLIC_SITE_URL)+'" width="132" height="132" style="display:block;width:132px;height:132px;margin:0 auto;border:4px solid white">'
-      : '<div style="padding:12px;border:1px solid #ddd;display:inline-block">QR unavailable. Visit <a href="'+escapeHtml(PUBLIC_SITE_URL)+'">'+escapeHtml(PUBLIC_SITE_URL)+'</a></div>') +
-    '<div style="margin-top:5px;font-size:10px">'+escapeHtml(PUBLIC_SITE_URL)+'</div>' +
-  '</div>';
-}
+// ------------------------------------------------------------
+// INVOICE LIST
+// ------------------------------------------------------------
 
 function renderInvoices() {
-  let invoices = filterByLoc(getInvoices());
-  if (!isAdmin()) invoices = invoices.filter(i => i.createdBy === currentUser.id);
-  if (invoiceFilter.text) { const q=invoiceFilter.text.toLowerCase(); invoices=invoices.filter(i=>i.customerName.toLowerCase().includes(q)||i.number.toLowerCase().includes(q)); }
-  if (invoiceFilter.status) invoices = invoices.filter(i=>i.status===invoiceFilter.status);
-  invoices.sort((a,b)=>asTimestamp(b.createdAt)-asTimestamp(a.createdAt));
-  const tbody = document.getElementById('invoices-body');
-  tbody.innerHTML = invoices.length===0
-    ? '<tr><td colspan="10" style="text-align:center;color:var(--gray-400);padding:40px">No invoices found</td></tr>'
-    : invoices.map(i=>'<tr><td class="mono" style="cursor:pointer" onclick="viewInvoice(\''+i.id+'\')">'+escapeHtml(i.number)+'</td><td class="mono">'+fmtDate(i.createdAt)+'</td><td>'+escapeHtml(i.customerName)+'</td><td><span class="badge badge-neutral">'+escapeHtml(i.location)+'</span></td><td style="color:var(--gray-600)">'+i.items.length+' item'+(i.items.length!==1?'s':'')+'</td><td class="mono" style="font-weight:500">'+fmtGHS(i.total)+'</td><td>'+statusBadge(i.status)+'</td><td>'+(i.payMethod==='cash'?'💵 Cash':i.payMethod==='momo'?'📱 MoMo':'—')+'</td><td style="color:var(--gray-400);font-size:12px">'+escapeHtml(i.createdByName || 'Unknown')+'</td><td><button class="btn btn-secondary btn-sm" onclick="viewInvoice(\''+i.id+'\')">View</button></td></tr>').join('');
-}
-function filterInvoices(val)      { invoiceFilter.text=val;   renderInvoices(); }
-function filterInvoiceStatus(val) { invoiceFilter.status=val; renderInvoices(); }
+  let invoices = typeof getInvoices === 'function'
+    ? uniqueInvoices(getInvoices()).slice()
+    : [];
 
-let cashSalesFilter = '';
-function filterCashSales(val) { cashSalesFilter = val; renderCashSales(); }
+  if (typeof filterByLoc === 'function') {
+    invoices = filterByLoc(invoices);
+  }
+
+  if (!isAdmin()) {
+    invoices = invoices.filter(inv =>
+      invoiceValue(inv, 'createdBy', 'created_by') === currentUser?.id
+    );
+  }
+
+  if (invoiceFilter.text) {
+    const query = invoiceFilter.text.toLowerCase();
+
+    invoices = invoices.filter(inv =>
+      invoiceCustomerName(inv).toLowerCase().includes(query) ||
+      String(invoiceNumber(inv)).toLowerCase().includes(query)
+    );
+  }
+
+  if (invoiceFilter.status) {
+    invoices = invoices.filter(inv => invoiceStatus(inv) === invoiceFilter.status);
+  }
+
+  invoices.sort((a, b) =>
+    new Date(invoiceDate(b) || 0) - new Date(invoiceDate(a) || 0)
+  );
+
+  const tbody = document.getElementById('invoices-body');
+  if (!tbody) return;
+
+  tbody.innerHTML = invoices.length
+    ? invoices.map(inv => {
+        const id = invoiceId(inv);
+        const items = invoiceItems(inv);
+
+        return `
+          <tr>
+            <td class="mono" style="cursor:pointer" onclick="viewInvoice('${invoiceEscape(id)}')">
+              ${invoiceEscape(invoiceNumber(inv))}
+            </td>
+            <td class="mono">${typeof fmtDate === 'function' ? fmtDate(invoiceDate(inv)) : ''}</td>
+            <td>${invoiceEscape(invoiceCustomerName(inv))}</td>
+            <td><span class="badge badge-neutral">${invoiceEscape(invoiceBranchName(inv))}</span></td>
+            <td>${items.length} item${items.length === 1 ? '' : 's'}</td>
+            <td class="mono">${invoiceMoney(invoiceTotal(inv))}</td>
+            <td>${typeof statusBadge === 'function' ? statusBadge(invoiceStatus(inv)) : invoiceEscape(invoiceStatus(inv))}</td>
+            <td>${invoiceEscape(invoicePayments(inv)[0]?.method || invoicePayments(inv)[0]?.payment_method || '—')}</td>
+            <td>${invoiceEscape(invoiceValue(inv, 'createdByName', 'created_by_name') || '—')}</td>
+            <td><button class="btn btn-secondary btn-sm" onclick="viewInvoice('${invoiceEscape(id)}')">View</button></td>
+          </tr>
+        `;
+      }).join('')
+    : '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--gray-400)">No invoices found</td></tr>';
+}
+
+function filterInvoices(value) {
+  invoiceFilter.text = value || '';
+  renderInvoices();
+}
+
+function filterInvoiceStatus(value) {
+  invoiceFilter.status = value || '';
+  renderInvoices();
+}
+
+// ------------------------------------------------------------
+// CASH SALES
+// Walk-in sales are invoices with no customer_id.
+// ------------------------------------------------------------
+
+function getMraCashSales() {
+  const invoices = typeof getCashSales === 'function'
+    ? uniqueInvoices(getCashSales())
+    : [];
+
+  return invoices.filter(inv =>
+    !invoiceValue(inv, 'customer_id', 'customerId')
+  );
+}
+
+function filterCashSales(value) {
+  cashSalesFilter = value || '';
+  renderCashSales();
+}
 
 function renderCashSales() {
-  let sales = filterByLoc(getCashSales());
-  if (!isAdmin()) sales = sales.filter(i => i.createdBy === currentUser.id);
-  if (cashSalesFilter) { const q=cashSalesFilter.toLowerCase(); sales=sales.filter(i=>i.customerName.toLowerCase().includes(q)||i.number.toLowerCase().includes(q)); }
-  sales.sort((a,b)=>asTimestamp(b.createdAt)-asTimestamp(a.createdAt));
+  let sales = getMraCashSales();
+
+  if (typeof filterByLoc === 'function') {
+    sales = filterByLoc(sales);
+  }
+
+  if (!isAdmin()) {
+    sales = sales.filter(inv =>
+      invoiceValue(inv, 'createdBy', 'created_by') === currentUser?.id
+    );
+  }
+
+  if (cashSalesFilter) {
+    const query = cashSalesFilter.toLowerCase();
+
+    sales = sales.filter(inv =>
+      invoiceCustomerName(inv).toLowerCase().includes(query) ||
+      String(invoiceNumber(inv)).toLowerCase().includes(query)
+    );
+  }
+
+  sales.sort((a, b) =>
+    new Date(invoiceDate(b) || 0) - new Date(invoiceDate(a) || 0)
+  );
+
   const tbody = document.getElementById('cashsales-body');
   if (!tbody) return;
-  tbody.innerHTML = sales.length===0
-    ? '<tr><td colspan="7" style="text-align:center;color:var(--gray-400);padding:40px">No cash sales yet</td></tr>'
-    : sales.map(i=>{
-        const syncBadge = i.offlineSync==='pending' ? ' <span class="badge badge-warning" style="font-size:9px">⏳ Pending Sync</span>'
-          : i.offlineSync==='failed' ? ' <span class="badge badge-danger" style="font-size:9px" title="Open Offline Sales Queue to review" onclick="event.stopPropagation();openOfflineQueueModal()">⚠ Needs Review</span>'
-          : '';
-        return '<tr><td class="mono" style="cursor:pointer" onclick="viewInvoice(\''+i.id+'\')">'+escapeHtml(i.number)+syncBadge+'</td><td class="mono">'+fmtDate(i.createdAt)+'</td><td><span class="badge badge-neutral">'+escapeHtml(i.location)+'</span></td><td style="color:var(--gray-600)">'+i.items.length+' item'+(i.items.length!==1?'s':'')+'</td><td class="mono" style="font-weight:500">'+fmtGHS(i.total)+'</td><td style="color:var(--gray-400);font-size:12px">'+escapeHtml(i.createdByName || 'Unknown')+'</td><td><button class="btn btn-secondary btn-sm" onclick="viewInvoice(\''+i.id+'\')">View</button></td></tr>';
-      }).join('');
+
+  tbody.innerHTML = sales.length
+    ? sales.map(inv => `
+        <tr>
+          <td class="mono" style="cursor:pointer" onclick="viewInvoice('${invoiceEscape(invoiceId(inv))}')">
+            ${invoiceEscape(invoiceNumber(inv))}
+          </td>
+          <td class="mono">${typeof fmtDate === 'function' ? fmtDate(invoiceDate(inv)) : ''}</td>
+          <td><span class="badge badge-neutral">${invoiceEscape(invoiceBranchName(inv))}</span></td>
+          <td>${invoiceItems(inv).length} items</td>
+          <td class="mono">${invoiceMoney(invoiceTotal(inv))}</td>
+          <td>${invoiceEscape(invoiceValue(inv, 'createdByName', 'created_by_name') || '—')}</td>
+          <td><button class="btn btn-secondary btn-sm" onclick="viewInvoice('${invoiceEscape(invoiceId(inv))}')">View</button></td>
+        </tr>
+      `).join('')
+    : '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--gray-400)">No cash sales found</td></tr>';
 }
 
-function _walkInName() {
-  const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  return 'Walk-in - ' + pad(now.getDate()) + '/' + pad(now.getMonth()+1) + '/' + now.getFullYear() +
-    ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
-}
+// ------------------------------------------------------------
+// NEW INVOICE / CASH SALE MODAL
+// ------------------------------------------------------------
 
 function openInvoiceModal(mode) {
   mode = mode === 'cash' ? 'cash' : 'invoice';
   window._invoiceMode = mode;
+  invoiceLastSubmissionSignature = null;
+  invoiceClientRef = null;
 
   lineItemCount = 0;
-  document.getElementById('line-items-body').innerHTML = '';
-  ['inv-cust-name','inv-cust-phone','inv-cust-addr','inv-notes','inv-momo-number'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-  document.getElementById('inv-status').value = 'pending';
-  document.getElementById('invoice-total-display').textContent = 'Total: GH₵ 0.00';
-  const discEl = document.getElementById('inv-discount');
-  if (discEl) discEl.value = 0;
-  const tenderedEl = document.getElementById('inv-cash-tendered');
-  if (tenderedEl) tenderedEl.value = '';
-  const changeEl = document.getElementById('inv-change-display');
-  if (changeEl) changeEl.textContent = '';
-  const _pmRow   = document.getElementById('payment-method-row');
-  const _momoRow = document.getElementById('momo-number-row');
-  const _pmCash  = document.getElementById('pm-cash');
-  const _pmMomo  = document.getElementById('pm-momo');
-  if (_pmRow)   _pmRow.style.display   = 'none';
-  if (_momoRow) _momoRow.style.display = 'none';
-  if (_pmCash)  _pmCash.style.cssText  = 'border:1px solid var(--gray-200);border-radius:var(--radius);padding:10px 14px;cursor:pointer;font-size:13px;font-weight:500;text-align:center';
-  if (_pmMomo)  _pmMomo.style.cssText  = 'border:1px solid var(--gray-200);border-radius:var(--radius);padding:10px 14px;cursor:pointer;font-size:13px;font-weight:500;text-align:center';
-  window._selectedPayMethod = '';
-  const locSel = document.getElementById('inv-location');
-  if (!isAdmin()) { locSel.value = currentUser.location; locSel.disabled = true; } else locSel.disabled = false;
 
-  const titleEl   = document.getElementById('invoice-modal-title');
-  const submitBtn = document.getElementById('invoice-submit-btn');
+  const body = document.getElementById('line-items-body');
+  if (body) body.innerHTML = '';
+
+  [
+    'inv-cust-name',
+    'inv-cust-phone',
+    'inv-cust-addr',
+    'inv-notes',
+    'inv-momo-number',
+    'inv-cash-tendered'
+  ].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) element.value = '';
+  });
+
+  const discount = document.getElementById('inv-discount');
+  if (discount) discount.value = '0';
+
+  const status = document.getElementById('inv-status');
+  if (status) status.value = mode === 'cash' ? 'paid' : 'pending';
+
+  const branchSelect = document.getElementById('inv-location');
+
+  if (branchSelect) {
+    const branches = typeof getBranches === 'function' ? getBranches() : [];
+
+    branchSelect.innerHTML = branches.map(branch => {
+      const id = branch.id;
+      const name = branch.branch_name || branch.branchName || branch.name;
+      return `<option value="${invoiceEscape(id)}">${invoiceEscape(name)}</option>`;
+    }).join('');
+
+    const availableIds = currentUser?.branchIds || [];
+    const firstAllowed = branches.find(branch =>
+      isAdmin() || availableIds.includes(branch.id)
+    );
+
+    if (firstAllowed) branchSelect.value = firstAllowed.id;
+
+    branchSelect.disabled = !isAdmin();
+  }
+
+  const title = document.getElementById('invoice-modal-title');
+  const submit = document.getElementById('invoice-submit-btn');
+
   const namePhone = document.getElementById('inv-fg-name-phone');
-  const addr      = document.getElementById('inv-fg-address');
-  const statusFg  = document.getElementById('inv-fg-status');
-  const tenderedFg = document.getElementById('inv-fg-tendered');
+  const address = document.getElementById('inv-fg-address');
+  const statusField = document.getElementById('inv-fg-status');
+  const tenderedField = document.getElementById('inv-fg-tendered');
 
   if (mode === 'cash') {
     if (namePhone) namePhone.style.display = 'none';
-    if (addr)      addr.style.display      = 'none';
-    if (statusFg)  statusFg.style.display  = 'none';
-    if (tenderedFg) tenderedFg.style.display = 'block';
-    document.getElementById('inv-cust-name').value = _walkInName();
-    document.getElementById('inv-status').value = 'paid';
-    window._selectedPayMethod = 'cash';
-    window._invoicePriceType = 'retail';
-    _updateCustomerTypePills('retail');
-    if (titleEl)   titleEl.textContent   = 'Cash Sale';
-    if (submitBtn) submitBtn.textContent = 'Complete Sale';
+    if (address) address.style.display = 'none';
+    if (statusField) statusField.style.display = 'none';
+    if (tenderedField) tenderedField.style.display = 'block';
+
+    if (title) title.textContent = 'Cash Sale';
+    if (submit) submit.textContent = 'Complete Sale';
   } else {
     if (namePhone) namePhone.style.display = '';
-    if (addr)      addr.style.display      = '';
-    if (statusFg)  statusFg.style.display  = '';
-    if (tenderedFg) tenderedFg.style.display = 'none';
-    // Reset customer type to wholesale (default since all prices are wholesale)
-    window._invoicePriceType = 'wholesale';
-    _updateCustomerTypePills('wholesale');
-    if (titleEl)   titleEl.textContent   = 'New Invoice';
-    if (submitBtn) submitBtn.textContent = 'Create Invoice';
+    if (address) address.style.display = '';
+    if (statusField) statusField.style.display = '';
+    if (tenderedField) tenderedField.style.display = 'none';
+
+    if (title) title.textContent = 'New Invoice';
+    if (submit) submit.textContent = 'Create Invoice';
   }
 
+  window._selectedPayMethod = mode === 'cash' ? 'cash' : '';
+
+  const paymentRow = document.getElementById('payment-method-row');
+  const momoRow = document.getElementById('momo-number-row');
+
+  if (paymentRow) paymentRow.style.display = mode === 'cash' ? 'block' : 'none';
+  if (momoRow) momoRow.style.display = 'none';
+
+  const cashButton = document.getElementById('pm-cash');
+  const momoButton = document.getElementById('pm-momo');
+
+  if (cashButton) cashButton.style.cssText = '';
+  if (momoButton) momoButton.style.cssText = '';
+
+  const totalDisplay = document.getElementById('invoice-total-display');
+  if (totalDisplay) totalDisplay.textContent = 'Total: GH₵ 0.00';
+
+  const changeDisplay = document.getElementById('inv-change-display');
+  if (changeDisplay) changeDisplay.textContent = '';
+
   addLineItem();
-  openModal('invoice-modal');
+
+  if (typeof openModal === 'function') openModal('invoice-modal');
 }
 
 function onStatusChange() {
-  const status  = document.getElementById('inv-status').value;
-  const pmRow   = document.getElementById('payment-method-row');
+  const status = document.getElementById('inv-status')?.value;
+  const paymentRow = document.getElementById('payment-method-row');
   const momoRow = document.getElementById('momo-number-row');
-  const showPm  = (status === 'paid' || status === 'partial');
-  if (pmRow) pmRow.style.display = showPm ? 'block' : 'none';
-  if (!showPm) {
+
+  const showPayment = status === 'paid' || status === 'partial';
+
+  if (paymentRow) paymentRow.style.display = showPayment ? 'block' : 'none';
+  if (!showPayment) {
     window._selectedPayMethod = '';
     if (momoRow) momoRow.style.display = 'none';
-    const cb = document.getElementById('momo-same-as-mine');
-    const input = document.getElementById('inv-momo-number');
-    if (cb) cb.checked = false;
-    if (input) { input.value = ''; input.disabled = false; input.style.opacity = '1'; }
   }
 }
 
 function selectPayMethod(method) {
-  window._selectedPayMethod = method;
-  const on  = 'border:2px solid var(--accent);border-radius:var(--radius);padding:10px 14px;cursor:pointer;font-size:13px;font-weight:600;text-align:center;background:var(--gray-50)';
-  const off = 'border:1px solid var(--gray-200);border-radius:var(--radius);padding:10px 14px;cursor:pointer;font-size:13px;font-weight:500;text-align:center';
-  document.getElementById('pm-cash').style.cssText = method==='cash' ? on : off;
-  document.getElementById('pm-momo').style.cssText = method==='momo' ? on : off;
-  document.getElementById('momo-number-row').style.display = method==='momo' ? 'block' : 'none';
-  if (method !== 'momo') {
-    const cb = document.getElementById('momo-same-as-mine');
-    const input = document.getElementById('inv-momo-number');
-    if (cb) cb.checked = false;
-    if (input) { input.value = ''; input.disabled = false; input.style.opacity = '1'; }
+  const allowed = ['cash', 'momo', 'bank_transfer', 'card', 'other'];
+
+  if (!allowed.includes(method)) {
+    invoiceToast('Invalid payment method.', 'error');
+    return;
   }
+
+  window._selectedPayMethod = method;
+
+  const buttons = {
+    cash: document.getElementById('pm-cash'),
+    momo: document.getElementById('pm-momo')
+  };
+
+  Object.entries(buttons).forEach(([key, button]) => {
+    if (!button) return;
+
+    button.style.border = key === method
+      ? '2px solid var(--accent)'
+      : '1px solid var(--gray-200)';
+  });
+
+  const momoRow = document.getElementById('momo-number-row');
+  if (momoRow) momoRow.style.display = method === 'momo' ? 'block' : 'none';
 }
 
 function toggleMomoSameAsMe(checkbox) {
   const input = document.getElementById('inv-momo-number');
+  if (!input) return;
+
   if (checkbox.checked) {
-    const customerPhone = document.getElementById('inv-cust-phone')?.value?.trim() || '';
-    if (!customerPhone) {
-      alert('Please enter the customer\'s phone number first.');
+    const phone = document.getElementById('inv-cust-phone')?.value?.trim() || '';
+
+    if (!phone) {
+      alert('Enter the customer phone number first.');
       checkbox.checked = false;
       return;
     }
-    input.value = customerPhone;
+
+    input.value = phone;
     input.disabled = true;
-    input.style.opacity = '0.6';
   } else {
     input.value = '';
     input.disabled = false;
-    input.style.opacity = '1';
   }
 }
 
-// Each row has its own sale-type select — the Customer Type pills bulk-apply
-// to all current rows and seed the default for new ones, but a customer can
-// still buy some products carton/wholesale and others retail on one invoice.
+// ------------------------------------------------------------
+// LINE ITEMS
+// MRA uses one selling_price per product.
+// The database calculates the authoritative price during creation.
+// ------------------------------------------------------------
+
+function getProductName(product) {
+  return product.product_name || product.name || '';
+}
+
+function getProductSellingPrice(product) {
+  return Number(product.selling_price ?? product.sellingPrice ?? 0);
+}
+
 function addLineItem() {
-  const id   = lineItemCount++;
-  const opts = getProducts().map(p=>'<option value="'+escAttr(p.name)+'">'+escapeHtml(p.name)+'</option>').join('');
-  const defaultType = window._invoicePriceType || 'wholesale';
-  const row  = document.createElement('div');
-  row.className = 'line-item-row'; row.id = 'li-'+id;
-  row.innerHTML =
-    '<input type="text" list="pl-'+id+'" placeholder="Product name" oninput="onLineItemInput('+id+')" onchange="onLineItemInput('+id+')" style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none">'+
-    '<datalist id="pl-'+id+'">'+opts+'</datalist>'+
-    '<select onchange="onLineItemInput('+id+')" style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none">'+
-      '<option value="retail"'+(defaultType==='retail'?' selected':'')+'>Retail</option>'+
-      '<option value="wholesale"'+(defaultType==='wholesale'?' selected':'')+'>Wholesale</option>'+
-      '<option value="carton"'+(defaultType==='carton'?' selected':'')+'>Carton</option>'+
-    '</select>'+
-    '<input type="number" placeholder="Qty" min="1" oninput="calcTotal()" style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none">'+
-    '<input type="number" placeholder="0.00" min="0" step="0.01" readonly title="Price set by sale type" oninput="calcTotal()" style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none;background:var(--gray-50);color:var(--gray-400);cursor:not-allowed">'+
-    '<button class="remove-item" onclick="removeLineItem('+id+')">×</button>';
-  document.getElementById('line-items-body').appendChild(row);
+  const id = lineItemCount++;
+  const products = typeof getProducts === 'function' ? getProducts() : [];
+
+  const options = products
+    .filter(product => product.is_active !== false && product.isActive !== false)
+    .map(product =>
+      `<option value="${invoiceEscape(getProductName(product))}">`
+    ).join('');
+
+  const row = document.createElement('div');
+  row.className = 'line-item-row';
+  row.id = 'li-' + id;
+
+  row.innerHTML = `
+    <input type="text"
+      list="pl-${id}"
+      placeholder="Product name"
+      oninput="onLineItemInput(${id})"
+      onchange="onLineItemInput(${id})"
+      style="padding:5px 7px;width:100%">
+    <datalist id="pl-${id}">${options}</datalist>
+
+    <input type="number"
+      placeholder="Qty"
+      min="1"
+      step="1"
+      oninput="calcTotal()"
+      style="padding:5px 7px;width:100%">
+
+    <input type="number"
+      placeholder="Unit price"
+      min="0"
+      step="0.01"
+      readonly
+      style="padding:5px 7px;width:100%;background:var(--gray-50)">
+
+    <button type="button" class="remove-item" onclick="removeLineItem(${id})">×</button>
+  `;
+
+  document.getElementById('line-items-body')?.appendChild(row);
 }
 
 function onLineItemInput(id) {
-  const row = document.getElementById('li-'+id);
+  const row = document.getElementById('li-' + id);
   if (!row) return;
-  const inputs    = row.querySelectorAll('input');
-  const ni        = inputs[0];
-  // inp[0]=name, inp[1]=qty, inp[2]=price — <select> isn't matched by querySelectorAll('input')
-  const pi        = inputs[2];
-  const priceType = row.querySelector('select')?.value || window._invoicePriceType || 'wholesale';
-  const m         = getProducts().find(p => p.name.toLowerCase() === ni.value.toLowerCase());
-  if (m) {
-    const newPrice = productPriceForType(m, priceType);
-    pi.removeAttribute('readonly');
-    pi.value = Number(newPrice).toFixed(2);
-    pi.setAttribute('readonly', '');
-    pi.style.borderColor = '#16a34a';
-    pi.style.color = '#166534';
-    setTimeout(() => { pi.style.borderColor = ''; pi.style.color = 'var(--gray-400)'; }, 1000);
+
+  const inputs = row.querySelectorAll('input');
+  const name = inputs[0]?.value?.trim() || '';
+
+  const product = (typeof getProducts === 'function' ? getProducts() : [])
+    .find(item =>
+      getProductName(item).toLowerCase() === name.toLowerCase()
+    );
+
+  if (product && inputs[2]) {
+    inputs[2].value = getProductSellingPrice(product).toFixed(2);
+  } else if (inputs[2]) {
+    inputs[2].value = '';
   }
+
   calcTotal();
 }
 
-function removeLineItem(id) { const r=document.getElementById('li-'+id); if(r) r.remove(); calcTotal(); }
+function removeLineItem(id) {
+  document.getElementById('li-' + id)?.remove();
+  calcTotal();
+}
+
+function calculateInvoiceFormTotals() {
+  let subtotal = 0;
+
+  document.querySelectorAll('#line-items-body .line-item-row').forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const quantity = Number(inputs[1]?.value || 0);
+    const price = Number(inputs[2]?.value || 0);
+
+    subtotal += quantity * price;
+  });
+
+  const discount = Math.max(
+    0,
+    Number(document.getElementById('inv-discount')?.value || 0)
+  );
+
+  return {
+    subtotal,
+    discount,
+    total: Math.max(0, subtotal - discount)
+  };
+}
 
 function calcTotal() {
-  let subtotal = 0;
-  document.querySelectorAll('#line-items-body .line-item-row').forEach(row => {
-    const inp = row.querySelectorAll('input');
-    // inp[0]=name(text), inp[1]=qty(number), inp[2]=price(number)
-    subtotal += (parseFloat(inp[1].value) || 0) * (parseFloat(inp[2].value) || 0);
-  });
-  const discount = Math.max(0, parseFloat(document.getElementById('inv-discount')?.value) || 0);
-  const total = Math.max(0, subtotal - discount);
-  document.getElementById('invoice-total-display').textContent =
-    'Subtotal: ' + fmtGHS(subtotal) +
-    ' | Discount: ' + fmtGHS(discount) +
-    ' | Total: ' + fmtGHS(total);
+  const totals = calculateInvoiceFormTotals();
+
+  const display = document.getElementById('invoice-total-display');
+  if (display) {
+    display.textContent =
+      'Subtotal: ' + invoiceMoney(totals.subtotal) +
+      ' | Discount: ' + invoiceMoney(totals.discount) +
+      ' | Total: ' + invoiceMoney(totals.total);
+  }
+
   updateChangeDisplay();
 }
 
-// Cash Sale only: shows the change due (or shortfall) as staff types in
-// what the customer handed over. Purely a live display — createInvoice()
-// re-derives and validates the real numbers itself before saving.
 function updateChangeDisplay() {
-  const changeEl = document.getElementById('inv-change-display');
-  if (!changeEl) return;
-  let subtotal = 0;
-  document.querySelectorAll('#line-items-body .line-item-row').forEach(row => {
-    const inp = row.querySelectorAll('input');
-    subtotal += (parseFloat(inp[1].value) || 0) * (parseFloat(inp[2].value) || 0);
-  });
-  const discount = Math.max(0, parseFloat(document.getElementById('inv-discount')?.value) || 0);
-  const total = Math.max(0, subtotal - discount);
-  const tenderedEl = document.getElementById('inv-cash-tendered');
-  const tendered = tenderedEl ? parseFloat(tenderedEl.value) || 0 : 0;
-  if (!tendered) { changeEl.textContent = ''; return; }
+  const display = document.getElementById('inv-change-display');
+  if (!display) return;
+
+  if (window._invoiceMode !== 'cash') {
+    display.textContent = '';
+    return;
+  }
+
+  const tendered = Number(document.getElementById('inv-cash-tendered')?.value || 0);
+  const total = calculateInvoiceFormTotals().total;
+
+  if (!tendered) {
+    display.textContent = '';
+    return;
+  }
+
   const change = tendered - total;
-  changeEl.textContent = change >= 0 ? 'Change due: ' + fmtGHS(change) : 'Short by ' + fmtGHS(Math.abs(change));
-  changeEl.style.color = change >= 0 ? 'var(--brand-green)' : 'var(--brand-red)';
+
+  display.textContent = change >= 0
+    ? 'Change due: ' + invoiceMoney(change)
+    : 'Short by ' + invoiceMoney(Math.abs(change));
 }
 
-// Thin wrapper: disables the Save button itself for the duration of a
-// submission, not just the invoiceSaving flag. The flag alone has a real
-// gap — it resets the moment a fast/failed attempt finishes, so reopening
-// the form afterward (e.g. because the "saved offline" toast was missed)
-// is a fresh click with nothing to say "this might be the same sale,"
-// letting two genuinely separate invoices get created for one intended
-// transaction. Disabling the actual button closes that gap regardless of
-// how the resubmission happens.
+// ------------------------------------------------------------
+// CUSTOMER RESOLUTION
+// ------------------------------------------------------------
+
+async function resolveInvoiceCustomer(name, phone, address) {
+  if (!name) return null;
+
+  const customers = typeof getCustomers === 'function' ? getCustomers() : [];
+
+  const existing = customers.find(customer => {
+    const customerName = customer.customer_name || customer.name || '';
+    return customerName.trim().toLowerCase() === name.trim().toLowerCase();
+  });
+
+  if (existing) return existing.id;
+
+  const api = invoiceAPI();
+
+  if (!api || typeof api.saveCustomer !== 'function') {
+    throw new Error('Customer service is unavailable.');
+  }
+
+  const result = await api.saveCustomer({
+    customer_name: name,
+    phone: phone || null,
+    address: address || null,
+    email: null,
+    notes: null,
+    is_active: true
+  });
+
+  if (result?.error) throw result.error;
+
+  const customer = result?.data || result;
+  return customer?.id || null;
+}
+
+// ------------------------------------------------------------
+// CREATE INVOICE / CASH SALE
+// ------------------------------------------------------------
+
 async function createInvoice() {
   if (invoiceSaving) return;
-  const btn = document.getElementById('invoice-submit-btn');
-  if (btn) btn.disabled = true;
+
+  const button = document.getElementById('invoice-submit-btn');
+  if (button) button.disabled = true;
+
+  invoiceSaving = true;
+
   try {
     await createInvoiceSubmit();
   } finally {
-    if (btn) btn.disabled = false;
+    invoiceSaving = false;
+    if (button) button.disabled = false;
   }
 }
 
 async function createInvoiceSubmit() {
-  invoiceSaving = true;
+  const api = invoiceAPI();
 
-  const name       = document.getElementById('inv-cust-name').value.trim();
-  const phone      = document.getElementById('inv-cust-phone').value.trim();
-  const addr       = document.getElementById('inv-cust-addr').value.trim();
-  const loc        = document.getElementById('inv-location').value;
-  const status     = document.getElementById('inv-status').value;
-  const notes      = document.getElementById('inv-notes').value.trim();
-  const discount   = Math.max(0, parseFloat(document.getElementById('inv-discount')?.value) || 0);
-  const momoEl     = document.getElementById('inv-momo-number');
-  const momoNumber = momoEl ? momoEl.value.trim() : '';
-
-  const needsPayMethod = status === 'paid' || status === 'partial';
-  if (needsPayMethod && !window._selectedPayMethod) {
-    invoiceSaving = false;
-    toast('Please select Cash or Mobile Money', 'error');
+  if (!api || !api.isConfigured || !api.isConfigured()) {
+    invoiceToast('MRA database is not configured. No invoice was saved.', 'error');
     return;
   }
-  const payMethod = needsPayMethod ? (window._selectedPayMethod || '') : '';
 
-  if (!name) { invoiceSaving = false; toast('Customer name is required', 'error'); return; }
-
-  const rows = document.querySelectorAll('#line-items-body .line-item-row');
-  if (rows.length === 0) { invoiceSaving = false; toast('Add at least one item', 'error'); return; }
-
-  const items = [];
-  let valid = true;
-  rows.forEach(row => {
-    const inp = row.querySelectorAll('input');
-    const pn  = inp[0].value.trim();
-    const qty   = parseInt(inp[1].value) || 0;
-    const price = parseFloat(inp[2].value) || 0;
-    const priceType = row.querySelector('select')?.value || window._invoicePriceType || 'wholesale';
-    if (!pn || qty < 1 || price <= 0) { valid = false; return; }
-    items.push({ name: pn, priceType, qty, price, total: qty * price });
-  });
-
-  if (!valid) { invoiceSaving = false; toast('Fill in all item fields (name, qty, price)', 'error'); return; }
-
-  const subtotal = items.reduce((s,i)=>s+i.total,0);
-  const total    = Math.max(0, subtotal - discount);
-  const seq      = LS.get('lumoda_invoice_seq')||2388;
-  const number   = String(seq).padStart(6,'0');
-  LS.set('lumoda_invoice_seq', seq+1);
+  if (!navigator.onLine) {
+    invoiceToast('You are offline. Reconnect before recording this transaction.', 'error');
+    return;
+  }
 
   const isCashSale = window._invoiceMode === 'cash';
 
-  let cashTendered = null;
-  if (isCashSale) {
-    const tenderedEl = document.getElementById('inv-cash-tendered');
-    cashTendered = tenderedEl ? parseFloat(tenderedEl.value) || 0 : 0;
-    if (!cashTendered) { invoiceSaving = false; toast('Enter how much cash the customer handed over', 'error'); return; }
-    if (cashTendered < total) { invoiceSaving = false; toast('Cash tendered is less than the total — check the amount', 'error'); return; }
-  }
+  const customerName = document.getElementById('inv-cust-name')?.value?.trim() || '';
+  const customerPhone = document.getElementById('inv-cust-phone')?.value?.trim() || '';
+  const customerAddress = document.getElementById('inv-cust-addr')?.value?.trim() || '';
+  const branchId = document.getElementById('inv-location')?.value || '';
+  const notes = document.getElementById('inv-notes')?.value?.trim() || '';
 
-  const invoice = {
-    id:'inv_'+Date.now(),
-    number,
-    customerName:name,
-    customerPhone:phone,
-    customerAddress:addr,
-    location:loc,
-    items,
-    subtotal,
-    discount,
-    total,
-    status,
-    payMethod,
-    momoNumber,
-    notes,
-    isCashSale,
-    cashTendered,
-    createdBy:currentUser.id,
-    createdByName:currentUser.fullName,
-    createdAt:Date.now(),
-    deleted:false
-  };
+  const totals = calculateInvoiceFormTotals();
 
-  if (window.LumodaSupabase && window.LumodaSupabase.isConfigured()) {
-    let rpcPayload = null;
-    try {
-      const cachedProducts = getProducts();
-      const p_items = items.map(it => {
-        const prod = cachedProducts.find(p => p.name.toLowerCase() === it.name.toLowerCase());
-        return { product_id: prod ? prod.id : null, name: it.name, qty: it.qty, price: it.price, sale_type: it.priceType || 'retail' };
-      });
-      rpcPayload = {
-        p_customer_name:    name,
-        p_location:         loc,
-        p_items:            p_items,
-        p_customer_phone:   phone    || null,
-        p_customer_address: addr     || null,
-        p_status:           status,
-        p_pay_method:       payMethod || null,
-        p_momo_number:      momoNumber || null,
-        p_notes:            notes    || null,
-        p_discount:         discount || 0,
-        p_is_cash_sale:     isCashSale,
-        p_cash_tendered:    cashTendered,
-        p_client_ref:       makeClientRef()
-      };
-      const res = await window.LumodaSupabase.createInvoiceNoStock(rpcPayload);
-      if (res.error) throw res.error;
-
-      if (res.data && res.data.discount_pending_approval) {
-        invoiceSaving = false;
-        closeModal('invoice-modal');
-        toast('Discount request sent — an admin needs to approve it before this sale can be completed', 'info');
-        return;
-      }
-
-      // The write already succeeded on the server at this point — a
-      // failure refreshing the local cache below must not be treated as a
-      // failed create (the catch block below would otherwise queue a
-      // second, redundant offline copy of a sale that's already recorded).
-      addAudit(isCashSale ? 'Cash Sale Created' : 'Invoice Created', currentUser.fullName+' created '+number+' for '+name+' — '+fmtGHS(total)+' ['+loc+']');
-      try { await syncSingleInvoice(res.data && res.data.invoice_id); } catch (e) { console.warn('Post-create cache refresh failed (sale still recorded):', e); }
-      invoiceSaving = false;
-      closeModal('invoice-modal');
-      toast(isCashSale ? 'Cash sale '+number+' recorded!' : 'Invoice '+number+' created!');
-      currentLocation = 'All';
-      renderDashboard();
-      if (isCashSale) {
-        if (document.getElementById('page-cashsales').classList.contains('active')) renderCashSales();
-      } else if (document.getElementById('page-invoices').classList.contains('active')) {
-        renderInvoices();
-      }
-      try { navigator.clipboard.writeText(generateInvoiceText(invoice)); } catch(e) {}
-      if (isCashSale) printInvoice(invoice);
-      return;
-    } catch (err) {
-      console.error('Invoice creation error:', err);
-      invoiceSaving = false;
-
-      // Cash sales specifically: a connectivity failure (not a rejection
-      // from the server) is queued locally instead of losing the sale.
-      // Regular credit invoices are unaffected — they still need a person
-      // to notice and retry, since "pending" invoices aren't a checkout
-      // moment that has to be resolved right now.
-      if (isCashSale && rpcPayload && isNetworkError(err)) {
-        queueOfflineCashSale(invoice, rpcPayload);
-        closeModal('invoice-modal');
-        currentLocation = 'All';
-        renderDashboard();
-        if (document.getElementById('page-cashsales').classList.contains('active')) renderCashSales();
-        try { navigator.clipboard.writeText(generateInvoiceText(invoice)); } catch(e) {}
-        printInvoice(invoice);
-        // A toast alone (auto-dismisses in ~3s, right as the modal closes
-        // and the page re-renders) is easy to miss — missing it is exactly
-        // what invites a resubmit. Opening the receipt itself, with the
-        // offline-sync banner from buildInvoiceHTML, requires an explicit
-        // Close click, so there's no ambiguity about whether this sale
-        // actually went through.
-        toast('No connection — cash sale '+number+' saved and will sync automatically', 'info');
-        viewInvoice(invoice.id);
-        return;
-      }
-
-      toast((err.message||'Could not create invoice'), 'error');
-      return;
-    }
-  }
-
-  const invoices = LS.get('lumoda_invoices')||[];
-  invoices.push(invoice);
-  LS.set('lumoda_invoices', invoices);
-  if (!isCashSale) saveCustomerIfNew(name,phone,addr,loc);
-  addAudit(isCashSale ? 'Cash Sale Created' : 'Invoice Created', currentUser.fullName+' created '+number+' for '+name+' — '+fmtGHS(total)+' ['+loc+']');
-  invoiceSaving = false;
-  closeModal('invoice-modal');
-  toast(isCashSale ? 'Cash sale '+number+' recorded!' : 'Invoice '+number+' created!');
-  currentLocation = 'All';
-  renderDashboard();
-  if (isCashSale) {
-    if (document.getElementById('page-cashsales').classList.contains('active')) renderCashSales();
-  } else if (document.getElementById('page-invoices').classList.contains('active')) {
-    renderInvoices();
-  }
-  try { navigator.clipboard.writeText(generateInvoiceText(invoice)); } catch(e) {}
-  if (isCashSale) printInvoice(invoice);
-}
-
-// ============================================================
-// OFFLINE CASH SALE QUEUE
-// A cash sale that fails purely because of connectivity (not because the
-// server rejected it) is saved locally and retried automatically once the
-// connection returns, instead of being lost. client_ref (generated below,
-// sent to create_invoice_no_stock) makes a retry idempotent server-side —
-// see the offline_cash_sale_idempotency migration — so a retry can never
-// create a duplicate invoice even if an earlier attempt actually reached
-// the server before the connection dropped.
-// ============================================================
-const OFFLINE_QUEUE_KEY = 'lumoda_offline_sales_queue';
-let syncingOfflineQueue = false;
-
-function makeClientRef() {
-  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-  return 'off_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-}
-
-function isNetworkError(err) {
-  if (!navigator.onLine) return true;
-  if (!err) return false;
-  if (err.name === 'TypeError') return true; // fetch()'s own "couldn't reach the server" error
-  const msg = String(err.message || '').toLowerCase();
-  return msg.includes('fetch') || msg.includes('network') || msg.includes('load failed');
-}
-
-function getOfflineQueue() { return LS.get(OFFLINE_QUEUE_KEY) || []; }
-function setOfflineQueue(q) { LS.set(OFFLINE_QUEUE_KEY, q); renderOfflineQueueBadge(); }
-
-function queueOfflineCashSale(invoice, rpcPayload) {
-  const queue = getOfflineQueue();
-  queue.push({
-    clientRef: rpcPayload.p_client_ref,
-    payload: rpcPayload,
-    invoice,
-    status: 'pending',
-    error: null,
-    queuedAt: Date.now()
-  });
-  setOfflineQueue(queue);
-
-  // Show it in Cash Sales immediately, tagged as unsynced, so the cashier
-  // sees continuity instead of wondering if it actually went through.
-  const invoices = LS.get('lumoda_invoices') || [];
-  invoices.push(Object.assign({}, invoice, { offlineSync: 'pending' }));
-  LS.set('lumoda_invoices', invoices);
-  addAudit(
-    'Cash Sale Queued Offline',
-    currentUser.fullName+' recorded '+invoice.number+' for '+invoice.customerName+' — '+fmtGHS(invoice.total)+' [no connection, will sync]',
-    { localOnly: true, sync: false }
-  );
-}
-
-function removeLocalPlaceholderInvoice(localId) {
-  const invoices = LS.get('lumoda_invoices') || [];
-  const idx = invoices.findIndex(i => i.id === localId);
-  if (idx >= 0) { invoices.splice(idx, 1); LS.set('lumoda_invoices', invoices); }
-}
-
-// Flips the Cash Sales row's badge from "⏳ Pending Sync" to "⚠ Needs Review"
-// once a sync attempt actually fails for a real reason (not connectivity).
-function markPlaceholderNeedsReview(localId) {
-  const invoices = LS.get('lumoda_invoices') || [];
-  const idx = invoices.findIndex(i => i.id === localId);
-  if (idx >= 0) { invoices[idx] = Object.assign({}, invoices[idx], { offlineSync: 'failed' }); LS.set('lumoda_invoices', invoices); }
-}
-
-async function trySyncOfflineQueueItem(item) {
-  try {
-    const res = await window.LumodaSupabase.createInvoiceNoStock(item.payload);
-    if (res.error) throw res.error;
-    if (res.data && res.data.discount_pending_approval) {
-      return { ok: false, needsReview: true, error: 'This sale included a discount that needs admin approval — open it and resubmit as a regular invoice.' };
-    }
-    removeLocalPlaceholderInvoice(item.invoice.id);
-    await syncSingleInvoice(res.data.invoice_id);
-    return { ok: true };
-  } catch (err) {
-    if (isNetworkError(err)) return { ok: false, stillOffline: true };
-    // A stale/expired access token reaches the server fine (not a network
-    // failure) but gets rejected — safe to retry once the token refreshes,
-    // NOT a permanent rejection of the sale itself. isAuthTokenStaleError
-    // (auth.js) explicitly excludes the disabled-account message, so a
-    // revoked user's queued sale still routes to needsReview below, not here.
-    if (typeof isAuthTokenStaleError === 'function' && isAuthTokenStaleError(err)) return { ok: false, staleAuth: true };
-    return { ok: false, needsReview: true, error: err.message || 'Could not sync this sale' };
-  }
-}
-
-async function trySyncOfflineQueue() {
-  if (syncingOfflineQueue) return;
-  if (!window.LumodaSupabase || !window.LumodaSupabase.isConfigured()) return;
-  if (!navigator.onLine) return;
-  if (!getOfflineQueue().some(i => i.status === 'pending')) return;
-
-  syncingOfflineQueue = true;
-  try {
-    // Only the client_refs to attempt are snapshotted up front — the queue
-    // itself is re-read fresh immediately before every write below, so a
-    // concurrent discard/retry (e.g. from the Offline Queue modal, which
-    // does its own independent read-modify-write) is never clobbered by a
-    // stale copy of the array held across this loop's awaits.
-    const clientRefsToTry = getOfflineQueue().filter(i => i.status === 'pending').map(i => i.clientRef);
-    let changed = false;
-    for (const clientRef of clientRefsToTry) {
-      const current = getOfflineQueue().find(i => i.clientRef === clientRef);
-      if (!current || current.status !== 'pending') continue; // discarded/changed since the snapshot
-
-      const result = await trySyncOfflineQueueItem(current);
-      const queueNow = getOfflineQueue();
-      const idx = queueNow.findIndex(i => i.clientRef === clientRef);
-      if (idx < 0) continue; // discarded while this attempt was in flight
-
-      if (result.ok) {
-        queueNow.splice(idx, 1);
-        LS.set(OFFLINE_QUEUE_KEY, queueNow);
-        changed = true;
-      } else if (result.needsReview) {
-        queueNow[idx].status = 'failed';
-        queueNow[idx].error = result.error;
-        LS.set(OFFLINE_QUEUE_KEY, queueNow);
-        markPlaceholderNeedsReview(current.invoice.id);
-        changed = true;
-      } else if (result.staleAuth) {
-        // Left pending indefinitely, this would be indistinguishable from
-        // an item that's simply waiting for signal — so it's bounded. But
-        // the bound is measured in CONNECTED time (getCumulativeOnlineMs,
-        // core.js), not wall-clock time: a device genuinely offline over a
-        // long weekend must not escalate a perfectly good sale just
-        // because wall-clock hours passed with nothing actually retried.
-        // Once STALE_TOKEN_RETRY_LIMIT_MS of *online* time has elapsed
-        // since this item's first auth-stale failure and it's still
-        // failing, something is permanently wrong (a refresh token that's
-        // outlived its own lifetime, most likely), and it's escalated to
-        // needsReview instead of retried forever.
-        const firstFailureOnlineMs = queueNow[idx].firstAuthFailureOnlineMs != null ? queueNow[idx].firstAuthFailureOnlineMs : getCumulativeOnlineMs();
-        if (getCumulativeOnlineMs() - firstFailureOnlineMs > STALE_TOKEN_RETRY_LIMIT_MS) {
-          queueNow[idx].status = 'failed';
-          queueNow[idx].error = 'Could not verify your session for over 24 hours of actual connected time — this needs a manual review rather than continuing to retry automatically.';
-          markPlaceholderNeedsReview(current.invoice.id);
-        } else {
-          queueNow[idx].firstAuthFailureOnlineMs = firstFailureOnlineMs;
-        }
-        LS.set(OFFLINE_QUEUE_KEY, queueNow);
-        changed = true;
-      }
-      // result.stillOffline: leave this one pending and move on to the next
-      // — one item that can't be classified shouldn't block the rest of the
-      // queue from syncing.
-    }
-    if (changed) {
-      renderDashboard();
-      if (document.getElementById('page-cashsales')?.classList.contains('active')) renderCashSales();
-    }
-  } finally {
-    syncingOfflineQueue = false;
-    renderOfflineQueueBadge();
-  }
-}
-
-function renderOfflineQueueBadge() {
-  const el = document.getElementById('offline-queue-badge');
-  if (!el) return;
-  const queue = getOfflineQueue();
-  if (queue.length === 0) { el.style.display = 'none'; return; }
-  const failed = queue.filter(i => i.status === 'failed').length;
-  el.style.display = 'inline-flex';
-  el.className = 'badge ' + (failed ? 'badge-danger' : 'badge-warning');
-  el.style.cursor = 'pointer';
-  el.textContent = failed
-    ? '⚠ '+failed+' sale'+(failed!==1?'s':'')+' need'+(failed===1?'s':'')+' review'
-    : '⏳ '+queue.length+' pending sync';
-}
-
-async function retryOfflineQueueItem(clientRef) {
-  const queue = getOfflineQueue();
-  const item = queue.find(i => i.clientRef === clientRef);
-  if (!item) return;
-  item.status = 'pending';
-  item.error = null;
-  item.firstAuthFailureOnlineMs = null; // a manual retry gets a fresh retry window, not the old clock
-  LS.set(OFFLINE_QUEUE_KEY, queue);
-  renderOfflineQueueBadge();
-  await trySyncOfflineQueue();
-  renderOfflineQueueModal();
-}
-
-function discardOfflineQueueItem(clientRef) {
-  // Discarding permanently drops a sale with nothing to show for it on the
-  // server — same accountability bar as deleteInvoice(), which also
-  // requires admin even for its own offline-placeholder branch.
-  if (!requireAdmin('discard queued sales')) return;
-  const queue = getOfflineQueue();
-  const item = queue.find(i => i.clientRef === clientRef);
-  if (!item) return;
-  const msg = item.status === 'failed'
-    ? 'Discard this sale permanently? It was never recorded on the server — only do this if it was a duplicate or mistake.'
-    : 'Discard this sale? It hasn\'t synced to the server yet, so nothing will be deleted there — it will just be removed from this device.';
-  if (!confirm(msg)) return;
-  setOfflineQueue(queue.filter(i => i.clientRef !== clientRef));
-  removeLocalPlaceholderInvoice(item.invoice.id);
-  renderDashboard();
-  if (document.getElementById('page-cashsales')?.classList.contains('active')) renderCashSales();
-  renderOfflineQueueModal();
-}
-
-function openOfflineQueueModal() {
-  renderOfflineQueueModal();
-  openModal('offline-queue-modal');
-}
-
-function renderOfflineQueueModal() {
-  const body = document.getElementById('offline-queue-body');
-  if (!body) return;
-  const queue = getOfflineQueue().slice().sort((a,b)=>b.queuedAt-a.queuedAt);
-  body.innerHTML = queue.length === 0
-    ? '<p style="color:var(--gray-400);text-align:center;padding:20px">Nothing queued — everything is synced.</p>'
-    : queue.map(item => {
-        const inv = item.invoice;
-        const statusHtml = item.status === 'failed'
-          ? '<div style="color:#991b1b;font-size:12px;margin-top:4px">⚠ '+escapeHtml(item.error||'Could not sync')+'</div>'
-          : '<div style="color:var(--gray-400);font-size:12px;margin-top:4px">⏳ Waiting for connection…</div>';
-        const actions =
-          (item.status === 'failed' ? '<button class="btn btn-secondary btn-sm" onclick="retryOfflineQueueItem(\''+item.clientRef+'\')">Retry</button> ' : '')
-          + '<button class="btn btn-secondary btn-sm" onclick="discardOfflineQueueItem(\''+item.clientRef+'\')">Discard</button>';
-        return '<div style="padding:12px 0;border-bottom:1px solid var(--gray-100)">'
-          + '<div style="display:flex;justify-content:space-between;align-items:center">'
-          + '<strong>'+escapeHtml(inv.number)+' — '+escapeHtml(inv.customerName)+'</strong>'
-          + '<span class="mono">'+fmtGHS(inv.total)+'</span>'
-          + '</div>'
-          + statusHtml
-          + '<div style="margin-top:8px">'+actions+'</div>'
-          + '</div>';
-      }).join('');
-}
-
-window.addEventListener('online', () => trySyncOfflineQueue());
-renderOfflineQueueBadge();
-
-function viewInvoice(id) {
-  viewingInvoiceId = id;
-  const inv = getAllInvoices().find(i=>i.id===id);
-  if (!inv) return;
-  document.getElementById('view-inv-title').textContent = 'Nr: '+inv.number;
-  document.getElementById('view-inv-body').innerHTML = buildInvoiceHTML(inv);
-
-  const delBtn = document.getElementById('view-inv-delete');
-  delBtn.style.display = isAdmin()&&!inv.deleted ? 'inline-flex':'none';
-  delBtn.onclick = () => deleteInvoice(id);
-
-  // FIX #1: Mark as Paid button — always show if not already paid and user can edit
-  const paidBtn = document.getElementById('view-inv-mark-paid');
-  if (paidBtn) {
-    paidBtn.style.display = canEditInvoice(inv) && inv.status !== 'paid' ? 'inline-flex' : 'none';
-    paidBtn.onclick = () => markViewingInvoicePaid();
-  }
-
-  const editBtn = document.getElementById('view-inv-edit');
-  if (editBtn) {
-    editBtn.style.display = canEditInvoice(inv) ? 'inline-flex' : 'none';
-    editBtn.onclick = () => openEditInvoiceModal(id);
-  }
-
-  // FIX #3: Share button — always present
-  const shareBtn = document.getElementById('view-inv-share');
-  if (shareBtn) {
-    shareBtn.style.display = 'inline-flex';
-    shareBtn.onclick = () => shareInvoice();
-  }
-
-  openModal('view-invoice-modal');
-}
-
-function buildInvoiceHTML(inv) {
-  const blanks = Array(Math.max(0,6-inv.items.length))
-    .fill('<tr><td style="padding:9px 10px">&nbsp;</td><td></td><td></td><td></td></tr>')
-    .join('');
-
-  return '<div style="border:2px solid var(--accent);border-radius:var(--radius);overflow:hidden;margin-bottom:14px">' +
-
-    '<div style="background:var(--brand-brown);color:white;padding:8px 14px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
-      '<div>' +
-        '<div style="font-family:var(--font-serif);font-size:16px;font-weight:600;letter-spacing:.04em">'+escapeHtml(getBusinessSettings()?.business_name || 'LUMODA ENTERPRISE')+'</div>' +
-        '<div style="font-family:var(--font-serif);font-style:italic;font-size:11px;opacity:.8">The cook\'s helper</div>' +
-        '<div style="font-size:10px;opacity:.7;margin-top:2px">Dealers in All Kinds of Kitchen Accessories</div>' +
-      '</div>' +
-      '<div style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:4px;padding:3px 10px;font-size:11px;font-weight:700;letter-spacing:.06em;white-space:nowrap;align-self:center">MAA LUCY\'S PLACE</div>' +
-      '<div style="text-align:right;font-size:9px;opacity:.75;font-family:var(--font-mono)">' +
-        '<div>LOC 1: Alabar, Ghana Region</div>' +
-        '<div>Shop No. OCL/ZR/GF/A20 &amp; A21</div>' +
-        '<div>LOC 2: Morocco (K.O) Old Barbers Bldg GF 26</div>' +
-        '<div>TEL: '+escapeHtml(getBusinessSettings()?.phone || '')+'</div>' +
-      '</div>' +
-    '</div>' +
-
-    '<div style="background:var(--brand-red);color:white;padding:5px 14px;display:flex;justify-content:space-between;align-items:center">' +
-      '<div style="font-weight:700;font-size:13px;letter-spacing:.08em">INVOICE</div>' +
-      '<div style="font-family:var(--font-mono);font-size:12px">Nr: <strong>'+escapeHtml(inv.number)+'</strong></div>' +
-      '<div style="font-family:var(--font-mono);font-size:11px">'+fmtDate(inv.createdAt)+'</div>' +
-    '</div>' +
-
-    '<div style="padding:10px 14px;background:var(--white)">' +
-      '<div style="display:flex;gap:16px;font-size:13px;flex-wrap:wrap">' +
-        '<span style="color:var(--gray-400)">Name:</span><strong>'+escapeHtml(inv.customerName)+'</strong>' +
-        (inv.customerPhone ? '<span style="color:var(--gray-400)">Tel:</span><span>'+escapeHtml(inv.customerPhone)+'</span>' : '') +
-      '</div>' +
-      (inv.customerAddress ? '<div style="font-size:13px;margin-top:4px"><span style="color:var(--gray-400)">Address:</span> '+escapeHtml(inv.customerAddress)+'</div>' : '') +
-    '</div>' +
-
-    '<table style="margin:0">' +
-      '<thead>' +
-        '<tr style="background:var(--brand-red)">' +
-          '<th style="color:white;padding:8px 10px;font-size:11px;width:56px;text-align:center">QTY</th>' +
-          '<th style="color:white;padding:8px 10px;font-size:11px">DESCRIPTION</th>' +
-          '<th style="color:white;padding:8px 10px;font-size:11px;text-align:right;width:100px">UNIT PRICE</th>' +
-          '<th style="color:white;padding:8px 10px;font-size:11px;text-align:right;width:110px">AMOUNT</th>' +
-        '</tr>' +
-      '</thead>' +
-      '<tbody>' +
-        inv.items.map(item =>
-          '<tr>' +
-            '<td style="text-align:center;padding:9px 10px;font-weight:500">'+escapeHtml(item.qty)+'</td>' +
-            '<td style="padding:9px 10px">'+escapeHtml(item.name)+'</td>' +
-            '<td style="text-align:right;padding:9px 10px;font-family:var(--font-mono)">'+Number(item.price || 0).toFixed(2)+'</td>' +
-            '<td style="text-align:right;padding:9px 10px;font-family:var(--font-mono);font-weight:600">'+Number(item.total || 0).toFixed(2)+'</td>' +
-          '</tr>'
-        ).join('') +
-        blanks +
-      '</tbody>' +
-    '</table>' +
-
-    '<div style="display:flex;flex-direction:column;align-items:flex-end;border-top:2px solid var(--accent);padding:10px 14px;gap:6px">' +
-      '<div><span style="font-size:13px;color:var(--gray-400)">Subtotal:</span> <span style="font-family:var(--font-mono)">'+fmtGHS(inv.subtotal || inv.total)+'</span></div>' +
-      '<div><span style="font-size:13px;color:var(--gray-400)">Discount:</span> <span style="font-family:var(--font-mono)">-'+fmtGHS(inv.discount || 0)+'</span></div>' +
-      '<div><span style="font-size:13px;font-weight:500">Total </span> <span style="font-family:var(--font-mono);font-size:18px;font-weight:700;color:var(--accent)">'+fmtGHS(inv.total)+'</span></div>' +
-      (inv.isCashSale && inv.cashTendered != null ? (
-        '<div><span style="font-size:13px;color:var(--gray-400)">Cash Tendered:</span> <span style="font-family:var(--font-mono)">'+fmtGHS(inv.cashTendered)+'</span></div>' +
-        '<div><span style="font-size:13px;font-weight:500">Change </span> <span style="font-family:var(--font-mono);font-size:16px;font-weight:700;color:var(--brand-green)">'+fmtGHS(Math.max(0, inv.cashTendered - inv.total))+'</span></div>'
-      ) : '') +
-    '</div>' +
-
-    '<div style="padding:8px 14px;border-top:1px solid var(--gray-100);display:flex;justify-content:space-between;align-items:center;background:var(--gray-50)">' +
-      '<span style="font-size:11px;color:var(--gray-400);font-style:italic">Goods sold out are not returnable</span>' +
-      statusBadge(inv.status) +
-      (inv.payMethod ? '&nbsp;&nbsp;<span class="badge badge-neutral">'+(inv.payMethod==='momo'?'📱 Mobile Money':'💵 Cash')+'</span>' : '') +
-      (inv.momoNumber ? '&nbsp;<span style="font-size:11px;color:var(--gray-400);font-family:var(--font-mono)">'+escapeHtml(inv.momoNumber)+'</span>' : '') +
-    '</div>' +
-
-    '<div style="font-size:11px;color:var(--gray-400);font-family:var(--font-mono);padding:6px 14px">' +
-      'Location: '+escapeHtml(inv.location)+' · By: '+escapeHtml(inv.createdByName || 'Unknown')+' · '+fmtDateTime(inv.createdAt) +
-    '</div>' +
-
-    (inv.notes ? '<div style="margin-top:10px;padding:10px;background:var(--gray-50);border-radius:var(--radius);font-size:13px;color:var(--gray-600)">'+escapeHtml(inv.notes)+'</div>' : '') +
-    (inv.deleted ? '<div style="margin-top:10px;padding:8px 12px;background:#fee2e2;border-radius:var(--radius);font-size:12px;color:#991b1b">⚠ Deleted by '+escapeHtml(inv.deletedBy)+' on '+fmtDateTime(inv.deletedAt)+'</div>' : '') +
-    (inv.offlineSync==='pending' ? '<div style="margin-top:10px;padding:8px 12px;background:#fef9c3;border-radius:var(--radius);font-size:12px;color:#854d0e">⏳ No connection when this was recorded — saved on this device and will sync automatically once you\'re back online.</div>' : '') +
-    (inv.offlineSync==='failed' ? '<div style="margin-top:10px;padding:8px 12px;background:#fee2e2;border-radius:var(--radius);font-size:12px;color:#991b1b">⚠ Could not sync automatically — open the Offline Sales Queue to review.</div>' : '') +
-  '</div>' + receiptQrMarkup();
-}
-
-async function deleteInvoice(id) {
-  if (!requireAdmin('delete invoices')) return;
-
-  // A cash sale still waiting to sync (or that failed to sync) was never
-  // actually recorded on the server — there's nothing there to delete, so
-  // this is a pure local discard, not a network call that can only fail.
-  const queueItem = getOfflineQueue().find(i => i.invoice.id === id);
-  if (queueItem) {
-    if (!confirm('This sale hasn\'t synced to the server yet. Discard it? This cannot be undone.')) return;
-    setOfflineQueue(getOfflineQueue().filter(i => i.clientRef !== queueItem.clientRef));
-    removeLocalPlaceholderInvoice(id);
-    addAudit('Offline Sale Discarded', currentUser.fullName+' discarded unsynced sale '+queueItem.invoice.number);
-    closeModal('view-invoice-modal'); toast('Sale discarded.'); renderPage('invoices');
+  if (!branchId) {
+    invoiceToast('Select a branch before creating the invoice.', 'error');
     return;
   }
 
-  if (!confirm('Soft-delete this invoice? It remains in the audit trail.')) return;
+  if (!isAdmin() && !(currentUser?.branchIds || []).includes(branchId)) {
+    invoiceToast('You do not have access to this branch.', 'error');
+    return;
+  }
 
-  if (window.LumodaSupabase && window.LumodaSupabase.isConfigured()) {
-    try {
-      const res = await window.LumodaSupabase.softDeleteInvoiceNoStock(id);
-      if (res.error) throw res.error;
-      // The delete itself already succeeded on the server at this point —
-      // a failure refreshing the local cache below is not a delete failure,
-      // and must not be reported or logged as one (the audit trail should
-      // reflect what actually happened, not what we managed to redisplay).
-      addAudit('Invoice Deleted', currentUser.fullName+' deleted invoice '+id+' [server]');
-      try { await syncSingleInvoice(id); } catch (e) { console.warn('Post-delete cache refresh failed (delete still succeeded):', e); }
-      closeModal('view-invoice-modal'); toast('Invoice deleted.'); renderPage('invoices');
+  if (!isCashSale && !customerName) {
+    invoiceToast('Customer name is required.', 'error');
+    return;
+  }
+
+  const rows = Array.from(
+    document.querySelectorAll('#line-items-body .line-item-row')
+  );
+
+  if (!rows.length) {
+    invoiceToast('Add at least one product.', 'error');
+    return;
+  }
+
+  const items = [];
+  let invalid = false;
+
+  rows.forEach(row => {
+    const inputs = row.querySelectorAll('input');
+
+    const productName = inputs[0]?.value?.trim() || '';
+    const quantity = Number(inputs[1]?.value || 0);
+
+    const product = (typeof getProducts === 'function' ? getProducts() : [])
+      .find(item =>
+        getProductName(item).toLowerCase() === productName.toLowerCase()
+      );
+
+    if (!product || !product.id || !Number.isInteger(quantity) || quantity < 1) {
+      invalid = true;
       return;
-    } catch (err) {
-      toast(err.message || 'Could not delete invoice', 'error');
+    }
+
+    items.push({
+      product_id: product.id,
+      quantity
+    });
+  });
+
+  if (invalid || !items.length) {
+    invoiceToast('Choose valid products and enter whole-number quantities.', 'error');
+    return;
+  }
+
+  if (totals.total <= 0) {
+    invoiceToast('The invoice total must be greater than zero.', 'error');
+    return;
+  }
+
+  if (totals.discount > totals.subtotal) {
+    invoiceToast('Discount cannot exceed the subtotal.', 'error');
+    return;
+  }
+
+  let initialPayment = 0;
+  let paymentMethod = null;
+
+  if (isCashSale) {
+    const tendered = Number(
+      document.getElementById('inv-cash-tendered')?.value || 0
+    );
+
+    if (tendered < totals.total) {
+      invoiceToast('Cash tendered is less than the total.', 'error');
       return;
+    }
+
+    initialPayment = totals.total;
+    paymentMethod = 'cash';
+  } else {
+    const status = document.getElementById('inv-status')?.value || 'pending';
+
+    if (status === 'paid') {
+      initialPayment = totals.total;
+    } else if (status === 'partial') {
+      const amountText = prompt(
+        'Enter the amount the customer is paying now (GH₵):'
+      );
+
+      if (amountText === null) return;
+
+      initialPayment = Number(amountText);
+
+      if (
+        !Number.isFinite(initialPayment) ||
+        initialPayment <= 0 ||
+        initialPayment >= totals.total
+      ) {
+        invoiceToast('Enter a valid partial payment below the invoice total.', 'error');
+        return;
+      }
+    }
+
+    if (initialPayment > 0) {
+      paymentMethod = window._selectedPayMethod || '';
+
+      if (!paymentMethod) {
+        invoiceToast('Select the payment method.', 'error');
+        return;
+      }
     }
   }
 
-  const invoices = LS.get('lumoda_invoices')||[];
-  const idx = invoices.findIndex(i=>i.id===id); if(idx<0) return;
-  const inv = invoices[idx];
-  invoices[idx]={...inv,deleted:true,deletedAt:Date.now(),deletedBy:currentUser.username};
-  LS.set('lumoda_invoices', invoices);
-  addAudit('Invoice Deleted', currentUser.fullName+' deleted '+inv.number+' ['+inv.location+']');
-  closeModal('view-invoice-modal'); toast('Invoice deleted.'); renderPage('invoices');
+  const submissionSignature = JSON.stringify({
+    mode: window._invoiceMode,
+    branchId,
+    customerName,
+    customerPhone,
+    customerAddress,
+    items,
+    discount: totals.discount,
+    initialPayment,
+    paymentMethod,
+    notes
+  });
+
+  if (submissionSignature === invoiceLastSubmissionSignature) {
+    invoiceToast('This transaction has already been submitted.', 'info');
+    return;
+  }
+
+  if (!invoiceClientRef) {
+    invoiceClientRef = window.MRAInvoiceDomain?.createClientRef?.() ||
+      `mra-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  let customerId = null;
+
+  try {
+    if (!isCashSale) {
+      customerId = await resolveInvoiceCustomer(
+        customerName,
+        customerPhone,
+        customerAddress
+      );
+
+      if (!customerId) {
+        throw new Error('Could not create or find the customer record.');
+      }
+    }
+
+    if (typeof api.createInvoice !== 'function') {
+      throw new Error('The MRA invoice service is unavailable.');
+    }
+
+    const result = await api.createInvoice({
+      branchId,
+      customerId,
+      items,
+      discountAmount: totals.discount,
+      taxAmount: 0,
+      initialPayment,
+      paymentMethod,
+      paymentReference: null,
+      notes,
+      clientRef: invoiceClientRef
+    });
+
+    if (result?.error) throw result.error;
+
+    const newInvoiceId = result?.data || result;
+    invoiceLastSubmissionSignature = submissionSignature;
+
+    try {
+      await invoiceRefresh();
+    } catch (refreshError) {
+      console.warn('Invoice was created, but the cache refresh failed:', refreshError);
+    }
+
+    if (typeof addAudit === 'function') {
+      addAudit(
+        isCashSale ? 'Cash Sale Created' : 'Invoice Created',
+        `${currentUser?.fullName || 'User'} recorded a transaction for ${invoiceMoney(totals.total)}`
+      );
+    }
+
+    if (typeof closeModal === 'function') closeModal('invoice-modal');
+
+    invoiceToast(
+      isCashSale ? 'Cash sale recorded successfully.' : 'Invoice created successfully.'
+    );
+
+    if (typeof renderDashboard === 'function') renderDashboard();
+    if (document.getElementById('page-invoices')?.classList.contains('active')) {
+      renderInvoices();
+    }
+    if (document.getElementById('page-cashsales')?.classList.contains('active')) {
+      renderCashSales();
+    }
+
+    // Open the saved invoice if the API returned its UUID.
+    if (newInvoiceId && typeof newInvoiceId === 'string') {
+      setTimeout(() => viewInvoice(newInvoiceId), 250);
+    }
+
+  } catch (error) {
+    console.error('MRA invoice creation failed:', error);
+    invoiceToast(error?.message || 'Could not create the invoice.', 'error');
+  }
+}
+
+// ------------------------------------------------------------
+// VIEW INVOICE
+// ------------------------------------------------------------
+
+function viewInvoice(id) {
+  const inv = getInvoiceById(id);
+  if (!inv) {
+    invoiceToast('Invoice not found. Refresh the data and try again.', 'error');
+    return;
+  }
+
+  viewingInvoiceId = id;
+
+  const title = document.getElementById('view-inv-title');
+  const body = document.getElementById('view-inv-body');
+
+  if (title) title.textContent = 'Invoice: ' + invoiceNumber(inv);
+  if (body) body.innerHTML = buildInvoiceHTML(inv);
+
+  const deleteButton = document.getElementById('view-inv-delete');
+  if (deleteButton) {
+    // No secure invoice cancellation/deletion RPC has been implemented yet.
+    deleteButton.style.display = 'none';
+  }
+
+  const editButton = document.getElementById('view-inv-edit');
+  if (editButton) {
+    // Invoice editing must wait for a secure database function.
+    editButton.style.display = 'none';
+  }
+
+  const paidButton = document.getElementById('view-inv-mark-paid');
+
+  if (paidButton) {
+    const canReceivePayment =
+      invoiceCanBeViewed(inv) &&
+      invoiceBalance(inv) > 0 &&
+      invoiceStatus(inv) !== 'cancelled';
+
+    paidButton.style.display = canReceivePayment ? 'inline-flex' : 'none';
+    paidButton.textContent = 'Record Payment';
+    paidButton.onclick = () => markViewingInvoicePaid();
+  }
+
+  const shareButton = document.getElementById('view-inv-share');
+
+  if (shareButton) {
+    shareButton.style.display = 'inline-flex';
+    shareButton.onclick = () => shareInvoice();
+  }
+
+  if (typeof openModal === 'function') openModal('view-invoice-modal');
+}
+
+// ------------------------------------------------------------
+// INVOICE HTML
+// ------------------------------------------------------------
+
+function getInvoiceBusinessDetails() {
+  const settings = typeof getBusinessSettings === 'function'
+    ? getBusinessSettings()
+    : {};
+
+  return {
+    name: settings?.business_name || 'MRA SYSTEMS',
+    phone: settings?.phone || '',
+    email: settings?.email || '',
+    address: settings?.address || '',
+    currency: settings?.currency_code || 'GHS'
+  };
+}
+
+function buildInvoiceHTML(inv) {
+  const business = getInvoiceBusinessDetails();
+  const items = invoiceItems(inv);
+  const branch = invoiceBranchName(inv);
+  const payments = invoicePayments(inv);
+  const paymentHistory = payments.length
+    ? payments
+    : invoicePaid(inv) > 0
+      ? [{
+          amount: invoicePaid(inv),
+          method: invoiceValue(inv, 'payMethod', 'pay_method', 'payment_method') || 'Payment'
+        }]
+      : [];
+
+  const itemRows = items.map(item => `
+    <tr>
+      <td style="padding:9px 10px;text-align:center;width:10%;white-space:nowrap">${item.qty}</td>
+      <td style="padding:9px 10px;width:50%;overflow-wrap:anywhere;word-break:break-word">${invoiceEscape(item.name)}</td>
+      <td style="padding:9px 10px;text-align:right;width:20%;white-space:nowrap">${item.price.toFixed(2)}</td>
+      <td style="padding:9px 10px;text-align:right;width:20%;font-weight:600;white-space:nowrap">${item.total.toFixed(2)}</td>
+    </tr>
+  `).join('');
+
+  return `
+    <div style="border:1px solid var(--gray-200);border-radius:var(--radius);overflow:hidden;margin-bottom:14px;background:white">
+
+      <div style="padding:18px 16px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:20px;font-weight:800">${invoiceEscape(business.name)}</div>
+          ${business.address ? `<div style="font-size:12px;color:var(--gray-500);margin-top:4px">${invoiceEscape(business.address)}</div>` : ''}
+          ${business.phone ? `<div style="font-size:12px;color:var(--gray-500)">${invoiceEscape(business.phone)}</div>` : ''}
+          ${business.email ? `<div style="font-size:12px;color:var(--gray-500)">${invoiceEscape(business.email)}</div>` : ''}
+        </div>
+
+        <div style="text-align:right">
+          <div style="font-size:22px;font-weight:800;letter-spacing:1px">INVOICE</div>
+          <div class="mono">${invoiceEscape(invoiceNumber(inv))}</div>
+          <div style="font-size:12px;color:var(--gray-500)">
+            ${typeof fmtDate === 'function' ? fmtDate(invoiceDate(inv)) : ''}
+          </div>
+        </div>
+      </div>
+
+      <div style="padding:12px 16px;background:var(--gray-50);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:11px;color:var(--gray-400)">CUSTOMER</div>
+          <strong>${invoiceEscape(invoiceCustomerName(inv))}</strong>
+          ${invoiceValue(inv, 'customerPhone', 'customer_phone') ? `<div style="font-size:12px">${invoiceEscape(invoiceValue(inv, 'customerPhone', 'customer_phone'))}</div>` : ''}
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--gray-400)">BRANCH</div>
+          <strong>${invoiceEscape(branch)}</strong>
+        </div>
+      </div>
+
+      <table style="margin:0;width:100%;table-layout:fixed;border-collapse:collapse">
+        <thead>
+          <tr style="background:var(--gray-100)">
+            <th style="padding:9px 10px;text-align:center">QTY</th>
+            <th style="padding:9px 10px;text-align:left">DESCRIPTION</th>
+            <th style="padding:9px 10px;text-align:right">UNIT PRICE</th>
+            <th style="padding:9px 10px;text-align:right">AMOUNT</th>
+          </tr>
+        </thead>
+        <tbody>${itemRows}</tbody>
+      </table>
+
+      <div style="padding:14px 16px;border-top:1px solid var(--gray-200)">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span>Subtotal</span><span>${invoiceMoney(invoiceSubtotal(inv))}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span>Discount</span><span>-${invoiceMoney(invoiceDiscount(inv))}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:18px;font-weight:800;margin-top:10px">
+          <span>Total</span><span>${invoiceMoney(invoiceTotal(inv))}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:8px">
+          <span>Amount paid</span><span>${invoiceMoney(invoicePaid(inv))}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-weight:700">
+          <span>Balance due</span><span>${invoiceMoney(invoiceBalance(inv))}</span>
+        </div>
+      </div>
+
+      ${paymentHistory.length ? `
+        <div style="padding:12px 16px;border-top:1px solid var(--gray-100)">
+          <strong style="display:block;margin-bottom:8px">Payment history</strong>
+          ${paymentHistory.map(payment => `
+            <div style="display:flex;justify-content:space-between;gap:12px">
+              <span>${invoiceEscape(payment.method || payment.payment_method || 'Payment')}</span>
+              <span>${invoiceMoney(payment.amount)}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+
+      <div style="padding:12px 16px;background:var(--gray-50);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <span style="font-size:12px;color:var(--gray-500)">
+          ${invoiceEscape(branch)} · Prepared by: ${invoiceEscape(invoiceValue(inv, 'createdByName', 'created_by_name') || 'MRA User')}
+        </span>
+        ${typeof statusBadge === 'function' ? statusBadge(invoiceStatus(inv)) : invoiceEscape(invoiceStatus(inv))}
+      </div>
+
+      ${invoiceValue(inv, 'notes') ? `
+        <div style="padding:12px 16px;border-top:1px solid var(--gray-100)">
+          <strong>Notes</strong>
+          <div>${invoiceEscape(inv.notes)}</div>
+        </div>
+      ` : ''}
+
+      <div style="padding:12px 16px;text-align:center;font-size:11px;color:var(--gray-400)">
+        Powered by MRA Systems
+      </div>
+    </div>
+  `;
+}
+
+// ------------------------------------------------------------
+// RECORD PAYMENT
+// Uses the secure record_payment RPC.
+// ------------------------------------------------------------
+
+async function markViewingInvoicePaid() {
+  const inv = getInvoiceById(viewingInvoiceId);
+  if (!inv) return;
+
+  const balance = invoiceBalance(inv);
+
+  if (balance <= 0) {
+    invoiceToast('This invoice has no outstanding balance.');
+    return;
+  }
+
+  if (!invoiceCanBeViewed(inv)) {
+    invoiceToast('You do not have permission to record payment for this invoice.', 'error');
+    return;
+  }
+
+  const amountText = prompt(
+    `Outstanding balance: ${invoiceMoney(balance)}\n\nEnter the amount received:`
+  );
+
+  if (amountText === null) return;
+
+  const amount = Number(amountText);
+
+  if (!Number.isFinite(amount) || amount <= 0 || amount > balance) {
+    invoiceToast('Enter a valid payment amount not exceeding the outstanding balance.', 'error');
+    return;
+  }
+
+  const method = prompt(
+    'Enter payment method:\n\ncash\nmomo\nbank_transfer\ncard\nother',
+    'cash'
+  );
+
+  if (method === null) return;
+
+  const normalizedMethod = method.trim().toLowerCase();
+  const allowedMethods = ['cash', 'momo', 'bank_transfer', 'card', 'other'];
+
+  if (!allowedMethods.includes(normalizedMethod)) {
+    invoiceToast('Invalid payment method.', 'error');
+    return;
+  }
+
+  const reference = normalizedMethod === 'momo'
+    ? (prompt('Enter the MoMo transaction reference (optional):') || '').trim()
+    : '';
+
+  const api = invoiceAPI();
+
+  if (!api || typeof api.recordPayment !== 'function') {
+    invoiceToast('The MRA payment service is unavailable.', 'error');
+    return;
+  }
+
+  try {
+    const result = await api.recordPayment({
+      invoiceId: invoiceId(inv),
+      amount,
+      paymentMethod: normalizedMethod,
+      paymentReference: reference || null,
+      paymentNote: null
+    });
+
+    if (result?.error) throw result.error;
+
+    try {
+      await invoiceRefresh();
+    } catch (refreshError) {
+      console.warn('Payment recorded, but cache refresh failed:', refreshError);
+    }
+
+    invoiceToast('Payment recorded successfully.');
+
+    viewInvoice(invoiceId(inv));
+
+    if (typeof renderDashboard === 'function') renderDashboard();
+    if (document.getElementById('page-invoices')?.classList.contains('active')) {
+      renderInvoices();
+    }
+
+  } catch (error) {
+    console.error('Payment recording failed:', error);
+    invoiceToast(error?.message || 'Could not record payment.', 'error');
+  }
+}
+
+// Compatibility with any older HTML button/function names.
+function _showMarkPaidDialog() {
+  markViewingInvoicePaid();
+}
+
+function _confirmMarkPaid() {
+  markViewingInvoicePaid();
+}
+
+function _selectMpdMethod(method) {
+  window._selectedPayMethod = method;
+}
+
+// ------------------------------------------------------------
+// INVOICE TEXT / SHARING
+// ------------------------------------------------------------
+
+function generateInvoiceText(inv) {
+  const business = getInvoiceBusinessDetails();
+  const lines = invoiceItems(inv).map(item =>
+    `${item.qty} x ${item.name} @ ${invoiceMoney(item.price)} = ${invoiceMoney(item.total)}`
+  );
+
+  return [
+    business.name,
+    'INVOICE',
+    `Invoice: ${invoiceNumber(inv)}`,
+    `Date: ${typeof fmtDate === 'function' ? fmtDate(invoiceDate(inv)) : ''}`,
+    `Branch: ${invoiceBranchName(inv)}`,
+    `Customer: ${invoiceCustomerName(inv)}`,
+    '',
+    ...lines,
+    '',
+    `Subtotal: ${invoiceMoney(invoiceSubtotal(inv))}`,
+    `Discount: ${invoiceMoney(invoiceDiscount(inv))}`,
+    `Total: ${invoiceMoney(invoiceTotal(inv))}`,
+    `Paid: ${invoiceMoney(invoicePaid(inv))}`,
+    `Balance: ${invoiceMoney(invoiceBalance(inv))}`,
+    `Status: ${invoiceStatus(inv).toUpperCase()}`,
+    '',
+    'Powered by MRA Systems'
+  ].join('\n');
 }
 
 function copyInvoiceText() {
-  const inv = getAllInvoices().find(i=>i.id===viewingInvoiceId); if(!inv) return;
-  try { navigator.clipboard.writeText(generateInvoiceText(inv)); toast('Invoice copied!'); } catch(e){ toast('Could not copy','error'); }
-}
-
-// ============================================================
-// FIX #3: Share invoice — works on all platforms
-// Uses native share if available (mobile), otherwise WhatsApp
-// with a copy-to-clipboard fallback for long text
-// ============================================================
-function shareInvoice() {
-  const inv = getAllInvoices().find(i => i.id === viewingInvoiceId);
+  const inv = getInvoiceById(viewingInvoiceId);
   if (!inv) return;
 
   const text = generateInvoiceText(inv);
 
-  // Try native Web Share API (works on mobile browsers with HTTPS)
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => invoiceToast('Invoice copied.'))
+      .catch(() => invoiceToast('Could not copy invoice text.', 'error'));
+  } else {
+    invoiceToast('Clipboard is not available in this browser.', 'error');
+  }
+}
+
+function shareInvoice() {
+  const inv = getInvoiceById(viewingInvoiceId);
+  if (!inv) return;
+
+  const text = generateInvoiceText(inv);
+
   if (navigator.share) {
     navigator.share({
-      title: 'Invoice ' + inv.number + ' — ' + inv.customerName,
-      text: text
-    }).catch(err => {
-      // User cancelled or API failed — fall through to manual share
-      if (err && err.name !== 'AbortError') {
-        _shareViaWhatsAppOrCopy(inv, text);
+      title: `Invoice ${invoiceNumber(inv)} — ${invoiceCustomerName(inv)}`,
+      text
+    }).catch(error => {
+      if (error?.name !== 'AbortError') {
+        shareInvoiceFallback(text);
       }
     });
     return;
   }
 
-  // No native share — open share sheet manually
-  _shareViaWhatsAppOrCopy(inv, text);
+  shareInvoiceFallback(text);
 }
 
-function _shareViaWhatsAppOrCopy(inv, text) {
-  // Build share sheet overlay
-  const existing = document.getElementById('share-sheet-overlay');
-  if (existing) existing.remove();
-
-  // Truncate for WhatsApp URL (max ~2000 chars safe)
-  const shortText = text.length > 1500
-    ? text.substring(0, 1480) + '\n...\n(See full invoice in app)'
-    : text;
-
-  const waUrl = 'https://wa.me/?text=' + encodeURIComponent(shortText);
-
-  const overlay = document.createElement('div');
-  overlay.id = 'share-sheet-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
-  overlay.innerHTML = `
-    <div style="background:white;border-radius:16px 16px 0 0;padding:24px;width:100%;max-width:480px;box-shadow:0 -4px 24px rgba(0,0,0,0.15)">
-      <div style="font-weight:700;font-size:16px;margin-bottom:6px">Share Invoice ${escapeHtml(inv.number)}</div>
-      <div style="font-size:13px;color:#666;margin-bottom:20px">${escapeHtml(inv.customerName)} · ${fmtGHS(inv.total)}</div>
-      <div style="display:grid;gap:10px">
-        <a href="${escapeHtml(waUrl)}" target="_blank" rel="noopener"
-           style="display:flex;align-items:center;gap:12px;padding:14px 16px;border:1px solid #e5e7eb;border-radius:10px;text-decoration:none;color:inherit;font-size:14px;font-weight:500"
-           onclick="document.getElementById('share-sheet-overlay').remove()">
-          <span style="font-size:24px">💬</span> Share via WhatsApp
-        </a>
-        <button onclick="_copyAndCloseShare()" 
-           style="display:flex;align-items:center;gap:12px;padding:14px 16px;border:1px solid #e5e7eb;border-radius:10px;background:white;cursor:pointer;font-size:14px;font-weight:500;width:100%;text-align:left">
-          <span style="font-size:24px">📋</span> Copy invoice text
-        </button>
-        <button onclick="_sendViaSMS()"
-           style="display:flex;align-items:center;gap:12px;padding:14px 16px;border:1px solid #e5e7eb;border-radius:10px;background:white;cursor:pointer;font-size:14px;font-weight:500;width:100%;text-align:left">
-          <span style="font-size:24px">📱</span> Send as SMS
-        </button>
-      </div>
-      <button onclick="document.getElementById('share-sheet-overlay').remove()"
-         style="margin-top:14px;width:100%;padding:12px;border:none;background:#f3f4f6;border-radius:10px;font-size:14px;font-weight:500;cursor:pointer">
-        Cancel
-      </button>
-    </div>
-  `;
-
-  // Close on backdrop click
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  document.body.appendChild(overlay);
-
-  // Store text for copy/SMS actions
-  window._pendingShareText = text;
-  window._pendingShareInv  = inv;
+function shareInvoiceFallback(text) {
+  const whatsappUrl = 'https://wa.me/?text=' + encodeURIComponent(text);
+  window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
 }
 
-function _copyAndCloseShare() {
-  const text = window._pendingShareText || '';
-  navigator.clipboard.writeText(text)
-    .then(() => toast('Invoice text copied to clipboard!'))
-    .catch(() => {
-      // Fallback for browsers without clipboard API
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity  = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      toast('Invoice text copied!');
-    });
-  const overlay = document.getElementById('share-sheet-overlay');
-  if (overlay) overlay.remove();
+// ------------------------------------------------------------
+// PRINT
+// ------------------------------------------------------------
+
+function printInvoice(inv) {
+  const invoiceToPrint = inv || getInvoiceById(viewingInvoiceId);
+
+  if (!invoiceToPrint) {
+    invoiceToast('Select an invoice before printing.', 'error');
+    return;
+  }
+
+  const business = getInvoiceBusinessDetails();
+  const html = buildInvoiceHTML(invoiceToPrint);
+
+  const printWindow = window.open('', '_blank');
+
+  if (!printWindow) {
+    invoiceToast('Allow pop-ups to print this invoice.', 'error');
+    return;
+  }
+
+  printWindow.document.open();
+  printWindow.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Invoice ${invoiceEscape(invoiceNumber(invoiceToPrint))}</title>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          color: #222;
+          max-width: 800px;
+          margin: 20px auto;
+          padding: 15px;
+        }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border-bottom: 1px solid #ddd; }
+        @media print {
+          body { margin: 0; padding: 0; }
+          button { display: none; }
+        }
+      </style>
+    </head>
+    <body>
+      ${html}
+      <script>
+        window.onload = function() {
+          window.print();
+        };
+      <\/script>
+    </body>
+    </html>
+  `);
+  printWindow.document.close();
 }
 
-function _sendViaSMS() {
-  const inv  = window._pendingShareInv;
-  const text = window._pendingShareText || '';
-  const phone = inv?.customerPhone ? inv.customerPhone.replace(/\s+/g,'') : '';
-  const smsUrl = phone
-    ? 'sms:' + phone + '?body=' + encodeURIComponent(text.substring(0, 800))
-    : 'sms:?body=' + encodeURIComponent(text.substring(0, 800));
-  window.open(smsUrl, '_blank');
-  const overlay = document.getElementById('share-sheet-overlay');
-  if (overlay) overlay.remove();
+// ------------------------------------------------------------
+// UNSUPPORTED OPERATIONS — INTENTIONALLY DISABLED
+// Do not perform financial writes through local storage.
+// Add secure database RPCs before enabling these features.
+// ------------------------------------------------------------
+
+async function deleteInvoice() {
+  invoiceToast(
+    'Invoice deletion is not enabled yet. A secure MRA cancellation function is required.',
+    'error'
+  );
 }
 
-// ============================================================
-// FIX #1: Mark as Paid — waits for cache before refreshing modal
-// ============================================================
-async function markViewingInvoicePaid() {
-  const inv = getAllInvoices().find(i=>i.id===viewingInvoiceId);
-  if (!inv) return;
-  if (!requireInvoiceEdit(inv, 'mark paid')) return;
-
-  // Show inline payment method picker instead of browser prompt
-  _showMarkPaidDialog(inv);
-}
-
-function _showMarkPaidDialog(inv) {
-  const existing = document.getElementById('mark-paid-overlay');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = 'mark-paid-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
-  overlay.innerHTML = `
-    <div style="background:white;border-radius:12px;padding:24px;width:100%;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-      <div style="font-weight:700;font-size:16px;margin-bottom:4px">Mark Invoice as Paid</div>
-      <div style="font-size:13px;color:#666;margin-bottom:20px">Invoice ${escapeHtml(inv.number)} · ${fmtGHS(inv.total)}</div>
-
-      <div style="font-size:13px;font-weight:600;margin-bottom:10px">Payment Method</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
-        <button id="mpd-cash" onclick="_selectMpdMethod('cash')"
-          style="padding:14px;border:2px solid #e5e7eb;border-radius:10px;background:white;cursor:pointer;font-size:14px;font-weight:500">
-          💵 Cash
-        </button>
-        <button id="mpd-momo" onclick="_selectMpdMethod('momo')"
-          style="padding:14px;border:2px solid #e5e7eb;border-radius:10px;background:white;cursor:pointer;font-size:14px;font-weight:500">
-          📱 MoMo
-        </button>
-      </div>
-
-      <div id="mpd-momo-row" style="display:none;margin-bottom:16px">
-        <label style="font-size:13px;font-weight:500;display:block;margin-bottom:6px">MoMo Number (optional)</label>
-        <input id="mpd-momo-number" type="tel" placeholder="e.g. 0244123456"
-          style="width:100%;padding:10px 12px;border:1px solid #e5e7eb;border-radius:8px;font-size:13px;box-sizing:border-box">
-      </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <button onclick="document.getElementById('mark-paid-overlay').remove()"
-          style="padding:12px;border:1px solid #e5e7eb;border-radius:8px;background:white;cursor:pointer;font-size:13px;font-weight:500">
-          Cancel
-        </button>
-        <button onclick="_confirmMarkPaid('${escapeHtml(inv.id)}')"
-          style="padding:12px;border:none;border-radius:8px;background:var(--brand-brown,#5C2D0A);color:white;cursor:pointer;font-size:13px;font-weight:600">
-          Confirm Paid
-        </button>
-      </div>
-    </div>
-  `;
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  document.body.appendChild(overlay);
-  window._mpdMethod = '';
-}
-
-function _selectMpdMethod(method) {
-  window._mpdMethod = method;
-  const on  = 'padding:14px;border:2px solid var(--brand-brown,#5C2D0A);border-radius:10px;background:#fdf8f3;cursor:pointer;font-size:14px;font-weight:600';
-  const off = 'padding:14px;border:2px solid #e5e7eb;border-radius:10px;background:white;cursor:pointer;font-size:14px;font-weight:500';
-  document.getElementById('mpd-cash').style.cssText = method === 'cash' ? on : off;
-  document.getElementById('mpd-momo').style.cssText = method === 'momo' ? on : off;
-  document.getElementById('mpd-momo-row').style.display = method === 'momo' ? 'block' : 'none';
-}
-
-async function _confirmMarkPaid(invId) {
-  if (!window._mpdMethod) { toast('Please select Cash or MoMo', 'error'); return; }
-  const momoNumber = document.getElementById('mpd-momo-number')?.value.trim() || '';
-
-  const overlay = document.getElementById('mark-paid-overlay');
-  if (overlay) overlay.remove();
-
-  // FIX #1: updateInvoice now awaits cache sync before calling viewInvoice
-  await updateInvoice(invId, {
-    status: 'paid',
-    payMethod: window._mpdMethod,
-    momoNumber
-  });
-}
-
-function generateInvoiceText(inv) {
-  const sep = '─'.repeat(58);
-  const rows = inv.items.map(item => {
-    const qty    = String(item.qty || '').padEnd(5);
-    const label  = item.name;
-    const name   = String(label || '').substring(0, 28).padEnd(28);
-    const unit   = Number(item.price || 0).toFixed(2).padStart(10);
-    const amount = Number(item.total || 0).toFixed(2).padStart(11);
-    return `${qty} ${name} ${unit} ${amount}`;
-  }).join('\n');
-
-  return `
-${'━'.repeat(58)}
-${getBusinessSettings()?.business_name || 'LUMODA ENTERPRISE'}
-The cook's helper
-Dealers in All Kinds of Kitchen Accessories
-MAA LUCY'S PLACE
-${'━'.repeat(58)}
-
-LOCATION 1: Alabar, Ghana Region
-Shop No. OCL/ZR/GF/A20 and A21
-
-LOCATION 2: Morocco (K.O) OLD Barbers Building
-Shop No. GF 26
-
-TEL: ${getBusinessSettings()?.phone || ''}
-
-${'━'.repeat(58)}
-INVOICE
-No: ${inv.number}
-Date: ${fmtDate(inv.createdAt)}
-
-Customer: ${inv.customerName}
-${inv.customerPhone ? 'Phone: ' + inv.customerPhone : ''}
-${inv.customerAddress ? 'Address: ' + inv.customerAddress : ''}
-
-${sep}
-QTY   DESCRIPTION                    UNIT PRICE     AMOUNT
-${sep}
-${rows}
-${sep}
-
-Subtotal: ${fmtGHS(inv.subtotal || inv.total)}
-Discount: ${fmtGHS(inv.discount || 0)}
-Total: ${fmtGHS(inv.total)}
-
-Status: ${String(inv.status || '').toUpperCase()}
-${inv.payMethod ? 'Payment: ' + (inv.payMethod === 'momo' ? 'Mobile Money' + (inv.momoNumber ? ' (' + inv.momoNumber + ')' : '') : 'Cash') : ''}
-${inv.notes ? 'Notes: ' + inv.notes : ''}
-
-Goods sold out are not returnable.
-`.trim();
-}
-
-// ==========================
-// INVOICE EDIT FEATURE
-// ==========================
-let editingInvoiceId = null;
-
-function openEditInvoiceModal(id) {
-  const inv = getAllInvoices().find(i => i.id === id);
-  if (!inv) return;
-  if (!requireInvoiceEdit(inv, 'edit')) return;
-
-  editingInvoiceId = id;
-
-  document.querySelector('#edit-customer-name').value = inv.customerName || '';
-  document.querySelector('#edit-phone').value         = inv.customerPhone || '';
-  document.querySelector('#edit-address').value       = inv.customerAddress || '';
-  document.querySelector('#edit-notes').value         = inv.notes || '';
-  document.querySelector('#edit-status').value        = inv.status || 'pending';
-  document.querySelector('#edit-pay-method').value    = inv.payMethod || '';
-
-  // Default sale type for any NEW row added during this edit — the mode
-  // (most common) type across existing items, not a lock on every row.
-  // Customers can legitimately buy some products carton/wholesale and
-  // others retail within the same invoice, so each row keeps its own type.
-  const typeCounts = {};
-  (inv.items || []).forEach(it => { const t = it.priceType || 'wholesale'; typeCounts[t] = (typeCounts[t] || 0) + 1; });
-  let modeType = 'wholesale', modeCount = 0;
-  Object.keys(typeCounts).forEach(t => { if (typeCounts[t] > modeCount) { modeType = t; modeCount = typeCounts[t]; } });
-  window._editInvoicePriceType = modeType;
-
-  // FIX #2 / #6: renderEditItems pulls fresh products each time
-  renderEditItems(inv.items || []);
-
-  openModal('edit-invoice-modal');
+function openEditInvoiceModal() {
+  invoiceToast(
+    'Invoice editing is not enabled yet. A secure MRA invoice-edit function is required.',
+    'info'
+  );
 }
 
 async function saveEditedInvoice() {
-  if (editInvoiceSaving) return;
-  editInvoiceSaving = true;
-
-  const id       = editingInvoiceId;
-  const existing = getAllInvoices().find(i => i.id === id);
-  if (!requireInvoiceEdit(existing, 'edit')) { editInvoiceSaving = false; return; }
-
-  const rows = document.querySelectorAll('#edit-items-container .line-item-row');
-  if (rows.length === 0) { editInvoiceSaving = false; toast('Add at least one item', 'error'); return; }
-
-  // Every row must be fully valid — don't silently drop incomplete rows (e.g. a
-  // product whose locked price tier resolves to 0), block save with a toast instead.
-  let allValid = true;
-  rows.forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    const name   = inputs[0].value.trim();
-    const qty    = parseInt(inputs[1].value) || 0;
-    const priceInput = inputs[2];
-    const price  = parseFloat(priceInput.value) || parseFloat(priceInput.getAttribute('value')) || 0;
-    if (!name || qty < 1 || price <= 0) allValid = false;
-  });
-  if (!allValid) { editInvoiceSaving = false; toast('Fill in all item fields (name, qty, price)', 'error'); return; }
-
-  const items = collectEditedItems();
-  if (!items.length) { editInvoiceSaving = false; toast('Add at least one item', 'error'); return; }
-
-  const status = document.querySelector('#edit-status').value || 'pending';
-  const needsPayMethod = status === 'paid' || status === 'partial';
-  const payMethod = needsPayMethod ? document.querySelector('#edit-pay-method').value : '';
-  if (needsPayMethod && !payMethod) { editInvoiceSaving = false; toast('Select a payment method for paid/partial invoices', 'error'); return; }
-
-  const subtotal = calculateTotal(items);
-  const updates  = {
-    customerName:    document.querySelector('#edit-customer-name').value.trim(),
-    customerPhone:   document.querySelector('#edit-phone').value.trim(),
-    customerAddress: document.querySelector('#edit-address').value.trim(),
-    notes:           document.querySelector('#edit-notes').value.trim(),
-    status,
-    payMethod,
-    items,
-    subtotal,
-    total: Math.max(0, subtotal - (existing.discount || 0)),
-  };
-
-  const saved = await updateInvoice(id, updates);
-  editInvoiceSaving = false;
-  if (saved) closeModal('edit-invoice-modal');
-}
-
-// ============================================================
-// FIX #1 + #6: updateInvoice — awaits cache before re-rendering
-// ============================================================
-async function updateInvoice(id, updates) {
-  const existing = getAllInvoices().find(i => i.id === id) || {};
-  if (!requireInvoiceEdit(existing, 'edit')) return false;
-
-  const itemsExplicitlyChanged = Object.prototype.hasOwnProperty.call(updates, 'items');
-  const mergedUpdates = {
-    ...existing,
-    ...updates,
-    items: itemsExplicitlyChanged ? updates.items : existing.items,
-    // FIX BUG 1: Flag tells updateInvoiceNoStock whether to touch invoice_items
-    // When marking paid (no items in updates), this is false → items are NEVER deleted
-    _itemsChanged: itemsExplicitlyChanged
-  };
-
-  if (window.LumodaSupabase && window.LumodaSupabase.isConfigured()) {
-    try {
-      const res = await window.LumodaSupabase.updateInvoiceNoStock(id, mergedUpdates);
-      if (res.error) throw res.error;
-
-      // The update itself already succeeded on the server at this point —
-      // a failure refreshing the local cache below is not an update
-      // failure, and must not be reported or logged as one.
-      addAudit('Invoice Edited', currentUser.fullName+' edited invoice '+id+' [server]');
-      try { await syncSingleInvoice(id); } catch (e) { console.warn('Post-update cache refresh failed (update still succeeded):', e); }
-
-      if (res.data && res.data.items_pending_approval) {
-        toast('Saved — but removing/reducing an item needs admin approval first, so that part is on hold', 'info');
-      } else {
-        toast('Invoice updated');
-      }
-
-      // Now re-render — cache is fresh so status/items show correctly
-      viewInvoice(id);
-      renderPage('invoices');
-      renderDashboard();
-      return true;
-    } catch (err) {
-      toast(err.message || 'Could not update invoice', 'error');
-      return false;
-    }
-  }
-
-  // Local storage path
-  const invoices = LS.get('lumoda_invoices') || [];
-  const idx      = invoices.findIndex(i => i.id === id);
-  if (idx < 0) return false;
-
-  invoices[idx] = {
-    ...invoices[idx],
-    ...mergedUpdates,
-    updatedAt: Date.now(),
-    updatedBy: currentUser?.username
-  };
-  LS.set('lumoda_invoices', invoices);
-
-  addAudit('Invoice Edited', currentUser.fullName+' edited invoice '+(invoices[idx].number || id)+' [local]');
-  toast('Invoice updated');
-
-  // FIX #1: re-read from updated localStorage — will show new status immediately
-  viewInvoice(id);
-  renderPage('invoices');
-  renderDashboard();
-  return true;
-}
-
-function calculateTotal(items) {
-  return items.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.price || 0)), 0);
-}
-
-// FIX #2/#6: renderEditItems always uses fresh product list
-function renderEditItems(items) {
-  const container = document.getElementById('edit-items-container');
-  if (!container) return;
-  container.innerHTML = '';
-  (items || []).forEach(item => addItem(item));
-  calcEditTotal();
-}
-
-// FIX #5: qty starts empty in edit modal too
-function addItem(item = {}) {
-  const container = document.getElementById('edit-items-container');
-  if (!container) return;
-
-  const uid = 'edit-' + Date.now() + '-' + Math.floor(Math.random() * 10000);
-
-  // FIX #2: Always get fresh products at the moment the row is created
-  const opts = getProducts()
-    .map(p => `<option value="${escAttr(p.name)}">${escapeHtml(p.name)}</option>`)
-    .join('');
-
-  const row = document.createElement('div');
-  row.className = 'line-item-row';
-  row.id = uid;
-
-  // qty: empty placeholder unless editing existing item
-  const qtyVal   = item.qty   != null ? escAttr(item.qty)   : '';
-  const priceVal = item.price != null ? escAttr(item.price) : '';
-  // Existing items keep their own stored sale type; a brand-new row defaults
-  // to the invoice's dominant type but can still be changed per-row.
-  const rowPriceType = item.priceType || window._editInvoicePriceType || 'wholesale';
-
-  row.innerHTML = `
-    <input type="text"
-      list="pl-${uid}"
-      placeholder="Product name"
-      value="${escAttr(item.name || '')}"
-      oninput="onEditItemInput('${uid}')"
-      onchange="onEditItemInput('${uid}')"
-      style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none">
-    <datalist id="pl-${uid}">${opts}</datalist>
-
-    <select onchange="onEditItemInput('${uid}')"
-      style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none">
-      <option value="retail"    ${rowPriceType === 'retail'    ? 'selected' : ''}>Retail</option>
-      <option value="wholesale" ${rowPriceType === 'wholesale' ? 'selected' : ''}>Wholesale</option>
-      <option value="carton"    ${rowPriceType === 'carton'    ? 'selected' : ''}>Carton</option>
-    </select>
-
-    <input type="number" value="${qtyVal}" min="1" placeholder="Qty" oninput="calcEditTotal()"
-      style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none">
-
-    <input type="number" value="${priceVal}" min="0" step="0.01" placeholder="0.00"
-      readonly title="Price is set automatically"
-      oninput="calcEditTotal()"
-      style="padding:5px 7px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:100%;font-family:var(--font-sans);outline:none;background:var(--gray-50);color:var(--gray-400);cursor:not-allowed">
-
-    <button type="button" class="remove-item" onclick="(function(){var r=document.getElementById('${uid}');if(r)r.remove();calcEditTotal();})();">×</button>
-  `;
-
-  container.appendChild(row);
-  calcEditTotal();
-}
-
-function onEditItemInput(uid) {
-  const row = document.getElementById(uid);
-  if (!row) return;
-
-  const inputs     = row.querySelectorAll('input');
-  const priceInput = inputs[2];
-  const name       = inputs[0].value.trim();
-  const priceType  = row.querySelector('select')?.value || window._editInvoicePriceType || 'wholesale';
-
-  const product = getProducts().find(p =>
-    p.name.toLowerCase() === name.toLowerCase()
+  invoiceToast(
+    'Invoice editing is not enabled yet. No changes were made.',
+    'error'
   );
-
-  if (product) {
-    const newPrice = productPriceForType(product, priceType);
-    // Must remove readonly to set value programmatically then restore
-    priceInput.removeAttribute('readonly');
-    priceInput.value = Number(newPrice).toFixed(2);
-    priceInput.setAttribute('readonly', '');
-    // Flash green to confirm price updated
-    priceInput.style.borderColor = '#16a34a';
-    priceInput.style.color = '#166534';
-    setTimeout(() => {
-      priceInput.style.borderColor = '';
-      priceInput.style.color = 'var(--gray-400)';
-    }, 1000);
-  }
-
-  calcEditTotal();
 }
 
-function collectEditedItems() {
-  const rows  = document.querySelectorAll('#edit-items-container .line-item-row');
-  const items = [];
-  rows.forEach(row => {
-    const inputs    = row.querySelectorAll('input');
-    const name      = inputs[0].value.trim();
-    const priceType = row.querySelector('select')?.value || window._editInvoicePriceType || 'wholesale';
-    const qty       = parseInt(inputs[1].value) || 0;
-    // Read price robustly — handle readonly fields in all browsers
-    const priceInput = inputs[2];
-    const price = parseFloat(priceInput.value) ||
-                  parseFloat(priceInput.getAttribute('value')) || 0;
-    if (name && qty > 0 && price > 0) {
-      items.push({ name, priceType, qty, price, total: qty * price });
-    }
-  });
-  return items;
+async function updateInvoice() {
+  invoiceToast(
+    'Invoice editing is not enabled yet. No changes were made.',
+    'error'
+  );
 }
 
-function calcEditTotal() {
-  const el = document.getElementById('edit-invoice-total-display');
-  if (!el) return;
-  const items    = collectEditedItems();
-  const subtotal = calculateTotal(items);
-  el.textContent = items.length > 0
-    ? 'Subtotal: ' + fmtGHS(subtotal) + '  |  Items: ' + items.length
-    : 'Total: GH₵ 0.00';
+// Legacy edit helpers retained only to prevent errors if old HTML references them.
+function calculateTotal() {
+  calcTotal();
 }
 
-function loadProductSuggestions(products) {
-  const list = document.getElementById('product-list');
-  if (!list) return;
-  list.innerHTML = products.map(p => `<option value="${escAttr(p.name)}"></option>`).join('');
-  // Also refresh any open line item datalists
-  refreshAllLineItemDataLists();
+function renderEditItems() {}
+function addItem() {}
+function onEditItemInput() {}
+function collectEditedItems() { return []; }
+function calcEditTotal() {}
+function loadProductSuggestions() {}
+
+// Offline sales queue is not supported by the MRA transaction design yet.
+function getOfflineQueue() { return []; }
+function renderOfflineQueueBadge() {}
+function renderOfflineQueueModal() {}
+function openOfflineQueueModal() {
+  invoiceToast('Offline cash-sale recording is not enabled. Reconnect before recording a sale.', 'info');
+}
+async function trySyncOfflineQueue() {}
+async function retryOfflineQueueItem() {}
+function discardOfflineQueueItem() {}
+function makeClientRef() {
+  return crypto?.randomUUID
+    ? crypto.randomUUID()
+    : 'mra-' + Date.now();
 }
 
-// ============================================================
-// PRINT INVOICE
-// ============================================================
-function printInvoice(inv) {
-  inv = inv || getAllInvoices().find(i => i.id === viewingInvoiceId);
-  if (!inv) return;
-
-  const pmLine = inv.payMethod
-    ? '<div style="margin-top:6px;font-size:12px"><strong>Payment:</strong> ' +
-      (inv.payMethod === 'momo' ? 'Mobile Money' + (inv.momoNumber ? ' — ' + escapeHtml(inv.momoNumber) : '') : 'Cash') + '</div>'
-    : '';
-
-  const noteLine = inv.notes
-    ? '<div style="margin-top:6px;font-size:12px"><strong>Notes:</strong> ' + escapeHtml(inv.notes) + '</div>'
-    : '';
-
-  const blanks = Array(Math.max(0, 8 - inv.items.length))
-    .fill(`<tr><td style="padding:8px 6px;border-bottom:1px solid #eee">&nbsp;</td><td style="border-bottom:1px solid #eee"></td><td style="border-bottom:1px solid #eee"></td><td style="border-bottom:1px solid #eee"></td></tr>`)
-    .join('');
-
-  const rows = inv.items.map(item => `
-    <tr>
-      <td style="text-align:center;padding:8px 6px;border-bottom:1px solid #eee">${item.qty}</td>
-      <td style="padding:8px 6px;border-bottom:1px solid #eee">${escapeHtml(item.name)}</td>
-      <td style="text-align:right;padding:8px 6px;border-bottom:1px solid #eee;font-family:monospace">${Number(item.price || 0).toFixed(2)}</td>
-      <td style="text-align:right;padding:8px 6px;border-bottom:1px solid #eee;font-family:monospace;font-weight:700">${Number(item.total || 0).toFixed(2)}</td>
-    </tr>
-  `).join('');
-
-  const html = `
-    <div style="font-family:'DM Sans',Arial,sans-serif;font-size:12px;color:#000;max-width:620px;margin:0 auto">
-      <table width="100%" cellpadding="0" cellspacing="0" style="background:#5C2D0A;color:white;padding:12px 16px">
-        <tr>
-          <td>
-            <div style="font-size:20px;font-weight:800;letter-spacing:1px">${escapeHtml(getBusinessSettings()?.business_name || 'LUMODA ENTERPRISE')}</div>
-            <div style="font-style:italic;font-size:12px;opacity:.9">The cook's helper</div>
-            <div style="font-size:10px;opacity:.75">Dealers in All Kinds of Kitchen Accessories</div>
-            <div style="font-size:10px;opacity:.85;margin-top:3px">Tel: ${escapeHtml(getBusinessSettings()?.phone || '')}</div>
-          </td>
-          <td align="right">
-            <div style="border:1px solid rgba(255,255,255,.45);padding:4px 10px;font-size:11px;font-weight:700">MAA LUCY'S PLACE</div>
-          </td>
-        </tr>
-      </table>
-      <div style="background:#C8291C;color:white;padding:8px 14px;display:flex;justify-content:space-between;font-weight:700;letter-spacing:.08em">
-        <span>INVOICE</span><span>No: ${escapeHtml(inv.number)}</span><span>${fmtDate(inv.createdAt)}</span>
-      </div>
-      <div style="padding:12px 14px;border-left:2px solid #5C2D0A;border-right:2px solid #5C2D0A">
-        <div><strong>Customer:</strong> ${escapeHtml(inv.customerName)}</div>
-        ${inv.customerPhone ? '<div><strong>Tel:</strong> '+escapeHtml(inv.customerPhone)+'</div>' : ''}
-        ${inv.customerAddress ? '<div><strong>Address:</strong> '+escapeHtml(inv.customerAddress)+'</div>' : ''}
-      </div>
-      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-left:2px solid #5C2D0A;border-right:2px solid #5C2D0A">
-        <thead>
-          <tr style="background:#C8291C;color:white">
-            <th style="padding:8px 6px;width:56px;text-align:center">QTY</th>
-            <th style="padding:8px 6px;text-align:left">DESCRIPTION</th>
-            <th style="padding:8px 6px;text-align:right">UNIT PRICE</th>
-            <th style="padding:8px 6px;text-align:right">AMOUNT</th>
-          </tr>
-        </thead>
-        <tbody>${rows}${blanks}</tbody>
-      </table>
-      <div style="border:2px solid #5C2D0A;border-top:0;padding:12px 14px">
-        <div style="text-align:right;font-size:13px;color:#555">Subtotal: ${fmtGHS(inv.subtotal || inv.total)}</div>
-        <div style="text-align:right;font-size:13px;color:#555">Discount: -${fmtGHS(inv.discount || 0)}</div>
-        <div style="text-align:right;font-size:16px;font-weight:800">Total: ${fmtGHS(inv.total)}</div>
-        ${inv.isCashSale && inv.cashTendered != null ? `
-        <div style="text-align:right;font-size:13px;color:#555">Cash Tendered: ${fmtGHS(inv.cashTendered)}</div>
-        <div style="text-align:right;font-size:15px;font-weight:800;color:#1a7a3c">Change: ${fmtGHS(Math.max(0, inv.cashTendered - inv.total))}</div>
-        ` : ''}
-        <div style="margin-top:8px;font-size:11px;color:#555">
-          <strong>Status:</strong> ${escapeHtml(inv.status.toUpperCase())}
-          ${pmLine}${noteLine}
-        </div>
-      </div>
-      <div style="margin-top:10px;font-size:11px;color:#555">Prepared By: ${escapeHtml(inv.createdByName || 'System')}</div>
-      <div style="margin-top:16px;text-align:center;font-size:10px;color:#666">Goods sold out are not returnable</div>
-    </div>
-    ${receiptQrMarkup()}
-  `;
-
-  const printArea = document.getElementById('print-area');
-  printArea.innerHTML = html;
-  window.print();
-}
+// Keep older calls harmless while removing the old queue implementation.
+window.addEventListener('online', () => {});

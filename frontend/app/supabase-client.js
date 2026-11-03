@@ -1,924 +1,1566 @@
-// supabase-client.js — LUMODA ENTERPRISE
+// ============================================================
+// MRA SYSTEMS — SUPABASE CLIENT
+// Database integration for MRA Systems
+// ============================================================
+
 (function () {
-  const cfg = window.LUMODA_SUPABASE || {};
+  const cfg = window.MRA_SUPABASE || {};
   let client = null;
-  const AUTH_STORAGE_KEY = 'lumoda-auth-token';
+
+  const AUTH_STORAGE_KEY = 'mra-auth-token';
+  const USER_CACHE_KEY = 'mra-session-user';
+
+  // ----------------------------------------------------------
+  // INITIALIZATION
+  // ----------------------------------------------------------
 
   function isConfigured() {
-    return Boolean(cfg.url && cfg.anonKey && !cfg.url.includes('YOUR_PROJECT_REF'));
+    return Boolean(
+      cfg.url &&
+      cfg.anonKey &&
+      !cfg.url.includes('YOUR_PROJECT_REF')
+    );
+  }
+
+  function getCachedSessionUser() {
+    try {
+      const raw = localStorage.getItem(USER_CACHE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function cacheSessionUser(user) {
+    try {
+      localStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
+    } catch (error) {
+      console.warn('Could not cache MRA session user:', error);
+    }
+  }
+
+  function clearCachedSessionUser() {
+    try {
+      localStorage.removeItem(USER_CACHE_KEY);
+    } catch (error) {}
   }
 
   function init() {
     if (!isConfigured()) return null;
+
     if (!window.supabase || !window.supabase.createClient) {
       console.warn('Supabase SDK was not loaded.');
       return null;
     }
+
     if (!client) {
-      client = window.supabase.createClient(cfg.url, cfg.anonKey, {
-        auth: {
-          persistSession: true,
-          autoRefreshToken: true,
-          detectSessionInUrl: true,
-          storage: window.localStorage,
-          // Explicit rather than supabase-js's undocumented default-derived
-          // key, so the app can reliably read the raw persisted session
-          // itself (see restoreSession()'s offline fallback) without
-          // depending on internal library behavior that isn't guaranteed.
-          storageKey: AUTH_STORAGE_KEY
+      client = window.supabase.createClient(
+        cfg.url,
+        cfg.anonKey,
+        {
+          auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+            detectSessionInUrl: true,
+            storage: window.localStorage,
+            storageKey: AUTH_STORAGE_KEY
+          }
         }
-      });
+      );
     }
+
     return client;
   }
 
-  function getClient() { return client || init(); }
+  function getClient() {
+    return client || init();
+  }
+
+  function requireClient() {
+    const sb = getClient();
+
+    if (!sb) {
+      throw new Error('MRA Supabase is not configured.');
+    }
+
+    return sb;
+  }
+
+  function unsupported(operation) {
+    throw new Error(
+      `${operation} is not yet available in MRA Systems. ` +
+      'It requires a dedicated secure database operation.'
+    );
+  }
+
+  // ----------------------------------------------------------
+  // AUTHENTICATION
+  // ----------------------------------------------------------
 
   async function signIn(email, password) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb.auth.signInWithPassword({ email, password });
+    const sb = requireClient();
+
+    return sb.auth.signInWithPassword({
+      email: String(email || '').trim().toLowerCase(),
+      password
+    });
   }
 
-  async function signOut() {
-    const sb = getClient();
-    if (!sb) return;
-    return sb.auth.signOut();
-  }
+  async function sendPasswordResetEmail(email, redirectTo = window.location.href) {
+    const address = String(email || '').trim().toLowerCase();
+    if (!address) throw new Error('Enter your account email first.');
 
-  // Reads the persisted session directly from localStorage, with no network
-  // call and no attempt to refresh an expired token — unlike getSession(),
-  // which internally tries to refresh once the access token has expired and
-  // returns null if that refresh fails (e.g. offline). This is what backs
-  // the offline session-restore fallback.
-  function getRawStoredSession() {
-    try {
-      const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) {
-      return null;
-    }
-  }
+    const { error } = await requireClient().auth.resetPasswordForEmail(
+      address,
+      { redirectTo }
+    );
 
-  // Removes the persisted session directly, independent of whether
-  // signOut()'s own network call succeeds — so logging out while offline
-  // still leaves nothing behind for a later offline-restore to pick up.
-  function clearRawStoredSession() {
-    try { window.localStorage.removeItem(AUTH_STORAGE_KEY); } catch (e) {}
-  }
-
-  async function getSession() {
-    const sb = getClient();
-    if (!sb) return { data: { session: null }, error: null };
-    return sb.auth.getSession();
-  }
-
-  async function getProfile(userId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb
-      .from('profiles')
-      .select('id, email, username, full_name, role, location, active, must_change_password, default_landing_page, has_seen_tour')
-      .eq('id', userId)
-      .single();
-  }
-
-  async function getProfileByUsername(username) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb
-      .from('profiles')
-      .select('id, email, username, full_name, role, location, active, must_change_password')
-      .eq('username', username)
-      .maybeSingle();
-  }
-
-  async function loadBusinessSettings() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('business_settings').select('*').eq('id', 1).single();
-    if (error) throw error;
-    return data;
-  }
-
-  async function saveBusinessSettings(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data: userData } = await sb.auth.getUser();
-    const { data, error } = await sb.from('business_settings').update({
-      business_name:          payload.businessName,
-      phone:                  payload.phone,
-      address:                payload.address,
-      currency_symbol:        payload.currencySymbol,
-      default_reorder_level:  Number(payload.defaultReorderLevel) || 0,
-      brand_color:            payload.brandColor,
-      logo_url:                payload.logoUrl,
-      onboarding_completed:   true,
-      updated_at:             new Date().toISOString(),
-      updated_by:             userData?.user?.id || null
-    }).eq('id', 1).select().single();
-    if (error) throw error;
-    return data;
-  }
-
-  async function markOnboardingSeen() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('business_settings')
-      .update({ onboarding_completed: true })
-      .eq('id', 1).select().single();
-    if (error) throw error;
-    return data;
-  }
-
-  async function completeStaffTour() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error } = await sb.rpc('complete_staff_tour');
-    if (error) throw error;
-  }
-
-  async function saveMyDefaultLandingPage(page, userId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error } = await sb.from('profiles').update({ default_landing_page: page || null }).eq('id', userId);
     if (error) throw error;
     return true;
   }
 
-  async function uploadLogo(file) {
+  async function signOut() {
     const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error: uploadError } = await sb.storage.from('branding').upload('logo', file, { upsert: true, cacheControl: '3600' });
-    if (uploadError) throw uploadError;
-    const { data } = sb.storage.from('branding').getPublicUrl('logo');
-    // Cache-bust so the new logo shows immediately instead of a browser's
-    // already-cached copy of the old image at the same URL.
-    return data.publicUrl + '?v=' + Date.now();
+
+    if (!sb) return;
+
+    try {
+      await sb.auth.signOut();
+    } finally {
+      clearRawStoredSession();
+      clearCachedSessionUser();
+    }
   }
 
-  async function saveLogoUrl(url) {
+  async function getSession() {
     const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data: userData } = await sb.auth.getUser();
-    const { data, error } = await sb.from('business_settings').update({
-      logo_url:   url,
-      updated_at: new Date().toISOString(),
-      updated_by: userData?.user?.id || null
-    }).eq('id', 1).select().single();
+
+    if (!sb) {
+      return {
+        data: { session: null },
+        error: null
+      };
+    }
+
+    return sb.auth.getSession();
+  }
+
+  async function getCurrentUser() {
+    const sb = getClient();
+
+    if (!sb) return null;
+
+    const { data, error } = await sb.auth.getUser();
+
+    if (error) throw error;
+
+    return data?.user || null;
+  }
+
+  function getRawStoredSession() {
+    try {
+      const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function clearRawStoredSession() {
+    try {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch (error) {}
+  }
+
+  async function getProfile(userId) {
+    const sb = requireClient();
+
+    return sb
+      .from('profiles')
+      .select(`
+        id,
+        email,
+        full_name,
+        role,
+        is_active,
+        created_at,
+        updated_at
+      `)
+      .eq('id', userId)
+      .single();
+  }
+
+  async function getMyProfile() {
+    const user = await getCurrentUser();
+
+    if (!user) return null;
+
+    const { data, error } = await getProfile(user.id);
+
+    if (error) throw error;
+
+    return data;
+  }
+
+  async function updateMyProfile(payload = {}) {
+    const user = await getCurrentUser();
+    if (!user?.id) throw new Error('You must be signed in to update your profile.');
+
+    const fullName = String(
+      payload.fullName ?? payload.full_name ?? ''
+    ).trim();
+
+    if (fullName.length < 2) {
+      throw new Error('Your name must contain at least 2 characters.');
+    }
+
+    const { data, error } = await requireClient()
+      .from('profiles')
+      .update({
+        full_name: fullName,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+      .select(`
+        id,
+        email,
+        full_name,
+        role,
+        is_active,
+        created_at,
+        updated_at
+      `)
+      .single();
+
     if (error) throw error;
     return data;
   }
 
-  function toLocalProduct(row) {
-  const retail = Number(row.retail_price ?? row.price ?? 0);
-  const wholesale = Number(row.wholesale_price ?? 0);
-  const carton = Number(row.carton_price ?? 0);
-
-  return {
-    id: row.id,
-    name: row.name,
-    sku: row.sku || '',
-    category: row.category || 'General',
-
-    price: retail,
-    retailPrice: retail,
-    wholesalePrice: wholesale,
-    cartonPrice: carton,
-
-    stockAlabar: Number(row.stock_alabar || 0),
-    stockMorocco: Number(row.stock_morocco || 0),
-    reorder: Number(row.reorder_level || 0)
-  };
-}
-
-  function toLocalCustomer(row) {
-    return {
-      id:        row.id,
-      name:      row.name,
-      phone:     row.phone    || '',
-      address:   row.address  || '',
-      location:  row.location,
-      createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
-    };
-  }
-
-  async function loadProducts() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb
-      .from('products')
-      .select('*')
-      .order('name', { ascending: true });
-    if (error) throw error;
-    return (data || []).map(toLocalProduct);
-  }
-
-  async function loadCustomers() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb
-      .from('customers')
-      .select('id, name, phone, address, location, created_at')
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return (data || []).map(toLocalCustomer);
-  }
-
-  const INVOICE_SELECT = `
-        id, number, customer_name, customer_phone, customer_address,
-        location, subtotal, discount, total, status, pay_method, momo_number, notes,
-        amount_paid, balance, partial_method, partial_momo_number, is_cash_sale, cash_tendered,
-        created_by, created_at, deleted, deleted_at, deleted_by,
-        creator:profiles!invoices_created_by_fkey (full_name, username),
-        invoice_items(*),
-        invoice_payments(id, amount, method, momo_number, note, created_by, created_at)
-      `;
-
-  function toLocalInvoice(row) {
-    return {
-      id:              row.id,
-      number:          row.number,
-      customerName:    row.customer_name,
-      customerPhone:   row.customer_phone,
-      customerAddress: row.customer_address,
-      location:        row.location,
-      items: (row.invoice_items || []).map(it => ({
-        name:      it.name,
-        priceType: it.sale_type || 'retail',
-        qty:       it.qty,
-        price:     Number(it.price || 0),
-        total:     Number(it.qty || 0) * Number(it.price || 0)
-      })),
-      subtotal:          Number(row.subtotal || row.total || 0),
-      discount:          Number(row.discount || 0),
-      total:             Number(row.total || 0),
-      status:            row.status,
-      payMethod:         row.pay_method         || '',
-      momoNumber:        row.momo_number        || '',
-      amountPaid:        Number(row.amount_paid || 0),
-      balance:           Number(row.balance     || 0),
-      partialMethod:     row.partial_method     || '',
-      partialMomoNumber: row.partial_momo_number || '',
-      payments: (row.invoice_payments || []).map(p => ({
-        id:         p.id,
-        amount:     Number(p.amount || 0),
-        method:     p.method    || '',
-        momoNumber: p.momo_number || '',
-        note:       p.note      || '',
-        by:         p.created_by,
-        at:         p.created_at ? new Date(p.created_at).getTime() : Date.now()
-      })),
-      notes:         row.notes       || '',
-      isCashSale:    !!row.is_cash_sale,
-      cashTendered:  row.cash_tendered != null ? Number(row.cash_tendered) : null,
-      createdBy:     row.created_by,
-      createdByName: row.created_by
-        ? (row.creator ? row.creator.full_name || row.creator.username || '' : '')
-        : '',
-      createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
-      deleted:   !!row.deleted,
-      deletedAt: row.deleted_at ? new Date(row.deleted_at).getTime() : null,
-      deletedBy: row.deleted_by || null
-    };
-  }
-
-  async function loadInvoices() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb
-      .from('invoices')
-      .select(INVOICE_SELECT)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return (data || []).map(toLocalInvoice);
-  }
-
-  // Fetches exactly one invoice (same shape as loadInvoices) so callers can
-  // patch their local cache after a single write instead of re-downloading
-  // every invoice in the business.
-  async function loadInvoiceById(id) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb
-      .from('invoices')
-      .select(INVOICE_SELECT)
-      .eq('id', id)
-      .maybeSingle();
-    if (error) throw error;
-    return data ? toLocalInvoice(data) : null;
+  // MRA uses email authentication, not username authentication.
+  async function getProfileByUsername() {
+    throw new Error(
+      'Username login is not supported. Please sign in using your email.'
+    );
   }
 
   async function loadProfiles() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
+    const sb = requireClient();
+
     const { data, error } = await sb
       .from('profiles')
-      .select('id, email, username, full_name, role, location, active, must_change_password, created_at, updated_at, last_login')
+      .select(`
+        id,
+        email,
+        full_name,
+        role,
+        is_active,
+        created_at,
+        updated_at
+      `)
       .order('created_at', { ascending: false });
+
     if (error) throw error;
+
     return data || [];
   }
 
   async function recordLogin() {
-    const sb = getClient();
-    if (!sb) return;
-    return sb.rpc('record_login');
+    // The MRA schema does not currently have a record_login RPC.
+    return null;
   }
 
-  async function createInvoiceNoStock(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const rpcItems = (payload.p_items || []).map(it => ({
-      product_id: it.product_id || null,
-      name:       String(it.name || ''),
-      qty:        Number(it.qty  || 0),
-      price:      Number(it.price || 0),
-      sale_type:  it.sale_type || it.priceType || 'retail'
-    }));
-    return sb.rpc('create_invoice_no_stock', {
-      p_customer_name:    payload.p_customer_name,
-      p_location:         payload.p_location,
-      p_items:            rpcItems,
-      p_customer_phone:   payload.p_customer_phone   || null,
-      p_customer_address: payload.p_customer_address || null,
-      p_status:           payload.p_status           || 'pending',
-      p_pay_method:       payload.p_pay_method       || null,
-      p_momo_number:      payload.p_momo_number      || null,
-      p_notes:            payload.p_notes            || null,
-      p_amount_paid:      payload.p_amount_paid      || 0,
-      p_discount:         payload.p_discount         || 0,
-      p_partial_method:   payload.p_partial_method   || null,
-      p_partial_momo:     payload.p_partial_momo     || null,
-      p_is_cash_sale:     payload.p_is_cash_sale     || false,
-      p_cash_tendered:    payload.p_cash_tendered    != null ? payload.p_cash_tendered : null,
-      p_client_ref:       payload.p_client_ref       || null
-    });
-  }
+  // ----------------------------------------------------------
+  // BUSINESS PROFILE
+  // ----------------------------------------------------------
 
-  async function saveProduct(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    // FIX: Each price is independent — never fall back to retail
-    // Use explicit null coalescing so 0 is stored as 0, not overwritten
-    const _retail    = Number(payload.retailPrice    ?? payload.price ?? 0);
-    const _wholesale = Number(payload.wholesalePrice ?? 0);
-    const _carton    = Number(payload.cartonPrice    ?? 0);
-
-    const row = {
-      name:            payload.name,
-      sku:             payload.sku      || null,
-      category:        payload.category || 'General',
-      price:           _retail,
-      retail_price:    _retail,
-      wholesale_price: _wholesale,
-      carton_price:    _carton,
-      stock_alabar:    Number(payload.stockAlabar  || 0),
-      stock_morocco:   Number(payload.stockMorocco || 0),
-      reorder_level:   Number(payload.reorder      || 5),
-      updated_at:      new Date().toISOString()
-    };
-    if (payload.id && !String(payload.id).startsWith('p_')) row.id = payload.id;
-    const fullRes = await sb.from('products').upsert(row, { onConflict: row.id ? 'id' : 'sku' }).select().single();
-    if (!fullRes.error) return fullRes;
-    const msg = String(fullRes.error.message || '').toLowerCase();
-    if (!msg.includes('retail_price') && !msg.includes('wholesale_price') && !msg.includes('carton_price')) return fullRes;
-    const basicRow = { name: row.name, sku: row.sku, category: row.category, price: row.price, stock_alabar: row.stock_alabar, stock_morocco: row.stock_morocco, reorder_level: row.reorder_level, updated_at: row.updated_at };
-    if (row.id) basicRow.id = row.id;
-    return sb.from('products').upsert(basicRow, { onConflict: basicRow.id ? 'id' : 'sku' }).select().single();
-  }
-
-  async function adjustProductStock({ productId, location, delta, type, note }) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('adjust_product_stock', {
-      p_product_id: productId,
-      p_location:   location,
-      p_delta:      Number(delta || 0),
-      p_type:       type || 'Correction',
-      p_note:       note || null
-    });
-    if (error) throw error;
-    return data;
-  }
-
-  async function linkCatalogItem(productId, warehouseProductId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('link_catalog_item', {
-      p_product_id: productId,
-      p_warehouse_product_id: warehouseProductId
-    });
-    if (error) throw error;
-    return data;
-  }
-
-  async function backfillWarehouseCatalog() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('backfill_warehouse_catalog_from_products');
-    if (error) throw error;
-    return data;
-  }
-
-  async function softDeleteInvoiceNoStock(invoiceId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb.rpc('soft_delete_invoice_no_stock', { p_invoice_id: invoiceId });
-  }
-
-  async function recordPartialPayment(invoiceId, amount, method, momoNumber, note) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb.rpc('record_partial_payment', {
-      p_invoice_id: invoiceId, p_amount: amount, p_method: method || null,
-      p_momo_number: momoNumber || null, p_note: note || null
-    });
-  }
-
-  async function loadSalesBreakdown(period, location) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const colMap = { day: 'sale_day', week: 'sale_week', month: 'sale_month' };
-    const col = colMap[period] || 'sale_day';
-    const now = new Date();
-    let from;
-    if (period === 'day') { from = new Date(now); from.setHours(0,0,0,0); }
-    else if (period === 'week') { from = new Date(now); from.setDate(now.getDate() - now.getDay()); from.setHours(0,0,0,0); }
-    else { from = new Date(now.getFullYear(), now.getMonth(), 1); }
-    let q = sb.from('product_sales_summary').select('product_name, qty_sold, unit_price, revenue, location').gte(col, from.toISOString());
-    if (location && location !== 'All') q = q.eq('location', location);
-    const { data, error } = await q.order('revenue', { ascending: false });
-    if (error) throw error;
-    const map = {};
-    (data || []).forEach(row => {
-      const k = row.product_name;
-      if (!map[k]) map[k] = { name: k, qty: 0, revenue: 0, price: Number(row.unit_price || 0) };
-      map[k].qty     += Number(row.qty_sold || 0);
-      map[k].revenue += Number(row.revenue  || 0);
-    });
-    return Object.values(map).sort((a, b) => b.revenue - a.revenue);
-  }
-
-  async function loadOutstandingBalances(location) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    let q = sb.from('outstanding_balances').select('id, number, customer_name, customer_phone, location, total, amount_paid, balance, created_at');
-    if (location && location !== 'All') q = q.eq('location', location);
-    const { data, error } = await q.order('created_at', { ascending: true });
-    if (error) throw error;
-    return (data || []).map(row => ({
-      id: row.id, number: row.number, customerName: row.customer_name,
-      customerPhone: row.customer_phone || '', location: row.location,
-      total: Number(row.total || 0), amountPaid: Number(row.amount_paid || 0),
-      balance: Number(row.balance || 0),
-      createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
-    }));
-  }
-
-  async function createStaffAccount(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.functions.invoke('create-staff-account', { body: payload });
-    if (error) {
-      // supabase-js's error.message for a failed Edge Function call is just
-      // "Edge Function returned a non-2xx status code" — the actual reason
-      // (e.g. "email already registered") is in the response body, which
-      // has to be read separately from error.context.
-      let reason = error.message;
-      try {
-        const body = await error.context?.json();
-        if (body?.error) reason = body.error;
-      } catch (_) { /* response wasn't JSON, or already consumed */ }
-      throw new Error(reason);
-    }
-    return data;
-  }
-
-  async function anyAdminExists() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('any_admin_exists');
-    if (error) throw error;
-    return !!data;
-  }
-
-  async function createBootstrapAdmin(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.functions.invoke('bootstrap-first-admin', { body: payload });
-    if (error) {
-      let reason = error.message;
-      try {
-        const body = await error.context?.json();
-        if (body?.error) reason = body.error;
-      } catch (_) { /* response wasn't JSON, or already consumed */ }
-      throw new Error(reason);
-    }
-    return data;
-  }
-
-  async function completePasswordChange() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb.rpc('complete_password_change');
-  }
-
-  async function importProducts(products, options = {}) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    return sb.rpc('import_products', {
-      p_products:         products,
-      p_stock_target:     options.stockTarget    || 'both',
-      p_default_category: options.defaultCategory || 'General',
-      p_default_reorder:  options.defaultReorder  || 5,
-      p_replace_stock:    options.replaceStock === true
-    });
-  }
-
-  // ============================================================
-  // FIX BUG 3: logAudit — try RPC first, fallback to direct insert
-  // ============================================================
-  async function logAudit(action, detail) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-
-    // Try the RPC first (in case it exists)
-    try {
-      const { error } = await sb.rpc('log_audit', { p_action: action, p_detail: detail });
-      if (!error) return { error: null };
-    } catch (e) {
-      // RPC doesn't exist — fall through to direct insert
-    }
-
-    // Direct insert into audit_logs table
-    // audit_logs columns: id (uuid auto), action, detail, created_by (uuid), created_at
-    try {
-      const { data: { user } } = await sb.auth.getUser();
-      return sb.from('audit_logs').insert({
-        action,
-        detail,
-        created_by: user?.id || null
-      });
-    } catch (e) {
-      console.warn('logAudit direct insert failed:', e);
-      return { error: e };
-    }
-  }
-
-  // ============================================================
-  // FIX BUG 3: loadAuditLogs — read from audit_logs table
-  // ============================================================
-  async function loadAuditLogs() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
+  async function loadBusinessSettings() {
+    const sb = requireClient();
 
     const { data, error } = await sb
-      .from('audit_logs')
-      .select('id, action, detail, created_by, created_at')
-      .order('created_at', { ascending: false })
-      .limit(1000);
+      .from('business_profile')
+      .select('*')
+      .limit(1)
+      .maybeSingle();
 
     if (error) throw error;
 
-    return (data || []).map(row => ({
-      id:        row.id,
-      action:    row.action    || '',
-      detail:    row.detail    || '',
-      by:        row.created_by || 'system',
-      byName:    row.created_by || 'system',
-      createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
-    }));
+    return data ? {
+      ...data,
+      currency_code: data.currency_code || (
+        data.currency_symbol === 'GH₵' ? 'GHS' : data.currency_symbol
+      )
+    } : data;
   }
 
-  // ============================================================
-  // FIX BUG 3: logStockHistory — write directly to stock_history table
-  // stock_history columns: id, product_id, product_name, location, change, type, created_by, created_at
-  // ============================================================
-  async function logStockHistory({ productId, productName, location, change, type, note }) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
+  async function saveBusinessSettings(payload = {}) {
+    const sb = requireClient();
 
-    try {
-      const { data: { user } } = await sb.auth.getUser();
-      return sb.from('stock_history').insert({
-        product_id:   productId   || null,
-        product_name: productName || '',
-        location:     location    || null,
-        change:       Number(change || 0),
-        type:         type        || 'Manual',
-        created_by:   user?.id   || null
-      });
-    } catch (e) {
-      console.warn('logStockHistory failed:', e);
-      return { error: e };
+    const updates = {
+      business_name: payload.businessName ?? payload.business_name,
+      business_type: payload.businessType ?? payload.business_type,
+      currency_code:
+        payload.currencyCode ??
+        payload.currency_code ??
+        'GHS',
+      currency_symbol:
+        payload.currencySymbol ??
+        payload.currency_symbol ??
+        'GH₵',
+      phone: payload.phone || null,
+      email: payload.email || null,
+      address: payload.address || null,
+      default_reorder_level: Number(
+        payload.defaultReorderLevel ??
+        payload.default_reorder_level ??
+        10
+      ),
+      brand_color: payload.brandColor ?? payload.brand_color ?? '#5C2D0A',
+      updated_at: new Date().toISOString()
+    };
+
+    if (!updates.business_name) {
+      throw new Error('Business name is required.');
     }
+
+    // Find the existing business profile first.
+    const { data: existing, error: findError } = await sb
+      .from('business_profile')
+      .select('id')
+      .limit(1)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    let result;
+
+    if (existing?.id) {
+      result = await sb
+        .from('business_profile')
+        .update(updates)
+        .eq('id', existing.id)
+        .select()
+        .single();
+    } else {
+      result = await sb
+        .from('business_profile')
+        .insert(updates)
+        .select()
+        .single();
+    }
+
+    if (result.error) throw result.error;
+
+    return result.data;
   }
 
-  // ============================================================
-  // FIX BUG 3: loadStockHistory — read from stock_history table
-  // ============================================================
+  async function markOnboardingSeen() {
+    return true;
+  }
+
+  async function completeStaffTour() {
+    return true;
+  }
+
+  async function saveMyDefaultLandingPage() {
+    unsupported('Saving a custom landing page');
+  }
+
+  async function uploadLogo() {
+    unsupported('Logo uploads');
+  }
+
+  async function saveLogoUrl() {
+    unsupported('Saving a business logo');
+  }
+
+  // ----------------------------------------------------------
+  // BRANCHES
+  // ----------------------------------------------------------
+
+  async function loadBranches() {
+    const sb = requireClient();
+
+    const { data, error } = await sb
+      .from('branches')
+      .select(`
+        id,
+        branch_name,
+        branch_code,
+        address,
+        phone,
+        is_active,
+        created_at,
+        updated_at
+      `)
+      .order('branch_name', { ascending: true });
+
+    if (error) throw error;
+
+    return data || [];
+  }
+
+  async function loadUserBranches(userId) {
+    const sb = requireClient();
+
+    const { data, error } = await sb
+      .from('user_branch_access')
+      .select(`
+        id,
+        user_id,
+        branch_id,
+        branches (
+          id,
+          branch_name,
+          branch_code,
+          is_active
+        )
+      `)
+      .eq('user_id', userId);
+
+    if (error) throw error;
+
+    return data || [];
+  }
+
+  // Branch management requires secure admin-only database functions.
+  async function saveBranch() {
+    unsupported('Creating or editing branches');
+  }
+
+  async function deleteBranch() {
+    unsupported('Deleting branches');
+  }
+
+  async function deactivateBranch() {
+    unsupported('Deactivating branches');
+  }
+
+  async function reactivateBranch() {
+    unsupported('Reactivating branches');
+  }
+
+  // ----------------------------------------------------------
+  // PRODUCT CATEGORIES
+  // ----------------------------------------------------------
+
+  async function loadCategories() {
+    const sb = requireClient();
+
+    const { data, error } = await sb
+      .from('product_categories')
+      .select('*')
+      .order('category_name', { ascending: true });
+
+    if (error) throw error;
+
+    return data || [];
+  }
+
+  // ----------------------------------------------------------
+  // PRODUCTS AND BRANCH INVENTORY
+  // ----------------------------------------------------------
+
+  function toLocalProduct(row, inventoryRows = [], categories = []) {
+    if (!row) return null;
+
+    const category = categories.find(
+      c => c.id === row.category_id
+    );
+
+    const branchStock = {};
+
+    inventoryRows
+      .filter(stock => stock.product_id === row.id)
+      .forEach(stock => {
+        branchStock[stock.branch_id] = Number(
+          stock.quantity || 0
+        );
+      });
+
+    return {
+      id: row.id,
+
+      name: row.product_name,
+      productName: row.product_name,
+
+      sku: row.sku || '',
+      barcode: row.barcode || '',
+
+      categoryId: row.category_id || null,
+
+      category: category
+        ? category.category_name
+        : 'Uncategorised',
+
+      description: row.description || '',
+
+      costPrice: Number(row.cost_price || 0),
+      sellingPrice: Number(row.selling_price || 0),
+
+      // Temporary compatibility fields for older UI components.
+      price: Number(row.selling_price || 0),
+      retailPrice: Number(row.selling_price || 0),
+
+      reorder: Number(row.reorder_level || 0),
+      unitName: row.unit_name || 'piece',
+
+      branchStock,
+
+      isActive: !!row.is_active,
+
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  async function loadProducts() {
+    const sb = requireClient();
+
+    const [
+      productsResult,
+      inventoryResult,
+      categoriesResult
+    ] = await Promise.all([
+      sb.from('products')
+        .select('*')
+        .order('product_name', { ascending: true }),
+
+      sb.from('branch_inventory')
+        .select('id, branch_id, product_id, quantity'),
+
+      sb.from('product_categories')
+        .select('id, category_name')
+    ]);
+
+    if (productsResult.error) throw productsResult.error;
+    if (inventoryResult.error) throw inventoryResult.error;
+    if (categoriesResult.error) throw categoriesResult.error;
+
+    const inventoryRows = inventoryResult.data || [];
+    const categories = categoriesResult.data || [];
+
+    return (productsResult.data || []).map(row =>
+      toLocalProduct(row, inventoryRows, categories)
+    );
+  }
+
+  // Product records and stock quantities are separate in MRA.
+  // This method only saves product information.
+  async function saveProduct(payload = {}) {
+    const sb = requireClient();
+
+    const row = {
+      product_name: String(
+        payload.productName ??
+        payload.product_name ??
+        payload.name ??
+        ''
+      ).trim(),
+
+      sku: payload.sku || null,
+      barcode: payload.barcode || null,
+
+      category_id:
+        payload.categoryId ??
+        payload.category_id ??
+        null,
+
+      description: payload.description || null,
+
+      cost_price: Number(
+        payload.costPrice ??
+        payload.cost_price ??
+        0
+      ),
+
+      selling_price: Number(
+        payload.sellingPrice ??
+        payload.selling_price ??
+        payload.price ??
+        0
+      ),
+
+      reorder_level: Number(
+        payload.reorder ??
+        payload.reorderLevel ??
+        payload.reorder_level ??
+        0
+      ),
+
+      unit_name:
+        payload.unitName ??
+        payload.unit_name ??
+        'piece',
+
+      is_active:
+        payload.isActive ??
+        payload.is_active ??
+        true,
+
+      updated_at: new Date().toISOString()
+    };
+
+    if (!row.product_name) {
+      throw new Error('Product name is required.');
+    }
+
+    let result;
+
+    if (payload.id) {
+      result = await sb
+        .from('products')
+        .update(row)
+        .eq('id', payload.id)
+        .select()
+        .single();
+    } else {
+      result = await sb
+        .from('products')
+        .insert(row)
+        .select()
+        .single();
+    }
+
+    if (result.error) throw result.error;
+
+    return {
+      data: toLocalProduct(result.data),
+      error: null
+    };
+  }
+
+  // Stock operations must use secure database functions.
+  async function adjustProductStock() {
+    unsupported('Stock adjustments');
+  }
+
+  async function logStockHistory() {
+    unsupported('Direct stock-history insertion');
+  }
+
+  async function importProducts(rows = []) {
+    const sb = requireClient();
+    if (!Array.isArray(rows) || !rows.length) {
+      throw new Error('At least one product is required.');
+    }
+
+    const { data: categories, error: categoryError } = await sb
+      .from('product_categories')
+      .select('id, category_name');
+    if (categoryError) throw categoryError;
+
+    const categoryIds = new Map(
+      (categories || []).map(category => [
+        String(category.category_name).trim().toLowerCase(),
+        category.id
+      ])
+    );
+
+    const imported = [];
+    for (const product of rows) {
+      const categoryName = String(product.category || '').trim().toLowerCase();
+      const categoryId = categoryName ? categoryIds.get(categoryName) : null;
+      if (categoryName && !categoryId) {
+        throw new Error(`Category "${product.category}" is not available.`);
+      }
+
+      const result = await saveProduct({
+        productName: product.name,
+        sku: product.sku || null,
+        categoryId,
+        costPrice: product.costPrice || 0,
+        sellingPrice: product.sellingPrice,
+        reorderLevel: product.reorder || 0,
+        unitName: product.unitName || 'piece'
+      });
+      imported.push(result.data);
+    }
+    return imported;
+  }
+
+  // ----------------------------------------------------------
+  // CUSTOMERS
+  // ----------------------------------------------------------
+
+  function toLocalCustomer(row) {
+    if (!row) return null;
+
+    return {
+      id: row.id,
+
+      name: row.customer_name,
+      customerName: row.customer_name,
+
+      phone: row.phone || '',
+      email: row.email || '',
+      address: row.address || '',
+      notes: row.notes || '',
+
+      isActive: !!row.is_active,
+
+      createdAt: row.created_at
+        ? new Date(row.created_at).getTime()
+        : Date.now()
+    };
+  }
+
+  async function loadCustomers() {
+    const sb = requireClient();
+
+    const { data, error } = await sb
+      .from('customers')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    return (data || []).map(toLocalCustomer);
+  }
+
+  async function saveCustomer(payload = {}) {
+    const sb = requireClient();
+
+    const row = {
+      customer_name: String(
+        payload.customerName ??
+        payload.customer_name ??
+        payload.name ??
+        ''
+      ).trim(),
+
+      phone: payload.phone || null,
+      email: payload.email || null,
+      address: payload.address || null,
+      notes: payload.notes || null,
+
+      is_active:
+        payload.isActive ??
+        payload.is_active ??
+        true,
+
+      updated_at: new Date().toISOString()
+    };
+
+    if (!row.customer_name) {
+      throw new Error('Customer name is required.');
+    }
+
+    let result;
+
+    if (payload.id) {
+      result = await sb
+        .from('customers')
+        .update(row)
+        .eq('id', payload.id)
+        .select()
+        .single();
+    } else {
+      result = await sb
+        .from('customers')
+        .insert(row)
+        .select()
+        .single();
+    }
+
+    if (result.error) throw result.error;
+
+    return {
+      data: toLocalCustomer(result.data),
+      error: null
+    };
+  }
+
+  // ----------------------------------------------------------
+  // INVOICES
+  // ----------------------------------------------------------
+
+  const INVOICE_SELECT = `
+    *,
+    customers (
+      id,
+      customer_name,
+      phone,
+      email
+    ),
+    invoice_items (*),
+    invoice_payments (*)
+  `;
+
+  function toLocalInvoice(row, profileNames = {}) {
+    const items = (row.invoice_items || []).map(item => ({
+      id: item.id,
+
+      productId: item.product_id,
+
+      name: item.product_name,
+      sku: item.sku || '',
+
+      qty: Number(item.quantity || 0),
+
+      price: Number(item.unit_price || 0),
+
+      cost: Number(item.unit_cost || 0),
+
+      discount: Number(item.discount_amount || 0),
+
+      total: Number(item.line_total || 0)
+    }));
+
+    const payments = (row.invoice_payments || []).map(payment => ({
+      id: payment.id,
+
+      amount: Number(payment.amount || 0),
+
+      method: payment.payment_method ||
+        payment.paymentMethod ||
+        payment.method ||
+        '',
+
+      reference: payment.payment_reference ||
+        payment.paymentReference ||
+        payment.reference ||
+        '',
+
+      note: payment.payment_note ||
+        payment.paymentNote ||
+        payment.note ||
+        '',
+
+      by: payment.received_by || null,
+
+      at: (payment.payment_date || payment.created_at)
+        ? new Date(payment.payment_date || payment.created_at).getTime()
+        : Date.now()
+    }));
+
+    const customer = row.customers || null;
+
+    return {
+      id: row.id,
+
+      number: row.invoice_number,
+
+      branchId: row.branch_id,
+
+      customerId: row.customer_id || row.customerId || null,
+      customer_id: row.customer_id || row.customerId || null,
+
+      customerName: customer?.customer_name ||
+        row.customer_name ||
+        'Walk-in Customer',
+
+      customerPhone: customer?.phone || row.customer_phone || '',
+      customerEmail: customer?.email || '',
+
+      location: row.branch_id,
+
+      items,
+
+      subtotal: Number(row.subtotal ?? row.subtotal_amount ?? 0),
+
+      discount: Number(row.discount_amount ?? row.discount ?? 0),
+
+      tax: Number(row.tax_amount ?? row.tax ?? 0),
+
+      total: Number(row.total_amount ?? row.total ?? 0),
+
+      amountPaid: Number(row.amount_paid ?? row.amountPaid ?? 0),
+
+      balance: Number(row.balance_due ?? row.balance ?? 0),
+
+      status: row.status,
+      payMethod: row.payment_method ||
+        row.pay_method ||
+        row.partial_method ||
+        null,
+      isCashSale: Boolean(
+        row.is_cash_sale ||
+        row.isCashSale ||
+        !(row.customer_id || row.customerId)
+      ),
+
+      notes: row.notes || '',
+
+      createdBy: row.created_by,
+      createdByName: profileNames[row.created_by] ||
+        row.created_by_name ||
+        row.createdByName ||
+        '',
+
+      createdAt: (row.invoice_date || row.created_at)
+        ? new Date(row.invoice_date || row.created_at).getTime()
+        : Date.now(),
+
+      payments
+    };
+  }
+
+  async function loadInvoices() {
+    const sb = requireClient();
+
+    const [{ data, error }, { data: profiles }] = await Promise.all([
+      sb
+        .from('invoices')
+        .select(INVOICE_SELECT)
+        .order('created_at', { ascending: false }),
+      sb
+        .from('profiles')
+        .select('id, full_name')
+    ]);
+
+    if (error) throw error;
+
+    const profileNames = Object.fromEntries(
+      (profiles || []).map(profile => [profile.id, profile.full_name])
+    );
+
+    return (data || []).map(row => toLocalInvoice(row, profileNames));
+  }
+
+  async function loadInvoiceById(id) {
+    const sb = requireClient();
+
+    const [{ data, error }, { data: profiles }] = await Promise.all([
+      sb
+        .from('invoices')
+        .select(INVOICE_SELECT)
+        .eq('id', id)
+        .maybeSingle(),
+      sb
+        .from('profiles')
+        .select('id, full_name')
+    ]);
+
+    if (error) throw error;
+
+    const profileNames = Object.fromEntries(
+      (profiles || []).map(profile => [profile.id, profile.full_name])
+    );
+
+    return data ? toLocalInvoice(data, profileNames) : null;
+  }
+
+  // ----------------------------------------------------------
+  // CREATE INVOICE
+  // ----------------------------------------------------------
+
+  async function createInvoice(payload = {}) {
+    const sb = requireClient();
+    const items = (payload.items || []).map(item => ({
+      product_id:
+        item.product_id ||
+        item.productId,
+
+      quantity: Number(
+        item.quantity ??
+        item.qty ??
+        0
+      )
+    }));
+
+    const branchId =
+      payload.branchId ||
+      payload.branch_id;
+
+    if (!branchId) {
+      throw new Error('A branch must be selected.');
+    }
+
+    if (!items.length) {
+      throw new Error('Add at least one product.');
+    }
+
+    for (const item of items) {
+      if (!item.product_id) {
+        throw new Error('Every invoice item must have a product.');
+      }
+
+      if (!Number.isFinite(item.quantity) || item.quantity <= 0) {
+        throw new Error('Product quantities must be greater than zero.');
+      }
+    }
+
+    const { data, error } = await sb.rpc('create_invoice', {
+      p_branch_id: branchId,
+
+      p_customer_id:
+        payload.customerId ||
+        payload.customer_id ||
+        null,
+
+      p_items: items,
+
+      p_discount_amount: Number(
+        payload.discountAmount ??
+        payload.discount ??
+        payload.p_discount ??
+        0
+      ),
+
+      p_tax_amount: Number(
+        payload.taxAmount ??
+        payload.tax ??
+        0
+      ),
+
+      p_initial_payment: Number(
+        payload.initialPayment ??
+        payload.amountPaid ??
+        payload.p_amount_paid ??
+        0
+      ),
+
+      p_payment_method:
+        payload.paymentMethod ||
+        payload.p_payment_method ||
+        null,
+
+      p_payment_reference:
+        payload.paymentReference ||
+        payload.p_payment_reference ||
+        null,
+
+      p_notes:
+        payload.notes ||
+        payload.p_notes ||
+        null
+    });
+
+    if (error) throw error;
+
+    return data;
+  }
+
+  // Compatibility wrapper for the older Lumoda invoice UI.
+  async function createInvoiceNoStock(payload = {}) {
+    const data = await createInvoice({
+      branchId:
+        payload.branchId ||
+        payload.branch_id,
+
+      customerId:
+        payload.customerId ||
+        payload.customer_id,
+
+      items:
+        payload.items ||
+        payload.p_items ||
+        [],
+
+      discountAmount:
+        payload.discountAmount ??
+        payload.discount ??
+        payload.p_discount ??
+        0,
+
+      taxAmount:
+        payload.taxAmount ??
+        payload.tax ??
+        0,
+
+      initialPayment:
+        payload.initialPayment ??
+        payload.amountPaid ??
+        payload.p_amount_paid ??
+        0,
+
+      clientRef:
+        payload.clientRef ||
+        payload.client_ref ||
+        null,
+
+      paymentMethod:
+        payload.paymentMethod ||
+        payload.p_payment_method ||
+        null,
+
+      paymentReference:
+        payload.paymentReference ||
+        payload.p_payment_reference ||
+        null,
+
+      notes:
+        payload.notes ||
+        payload.p_notes ||
+        null
+    });
+
+    return {
+      data,
+      error: null
+    };
+  }
+
+  // ----------------------------------------------------------
+  // PAYMENTS
+  // ----------------------------------------------------------
+
+  async function recordPayment(
+    invoiceId,
+    amount,
+    method,
+    reference,
+    note
+  ) {
+    const sb = requireClient();
+
+    const payload = invoiceId && typeof invoiceId === 'object'
+      ? invoiceId
+      : {
+          invoiceId,
+          amount,
+          paymentMethod: method,
+          paymentReference: reference,
+          paymentNote: note
+        };
+
+    const { data, error } = await sb.rpc('record_payment', {
+      p_invoice_id: payload.invoiceId || payload.invoice_id,
+
+      p_amount: Number(payload.amount),
+
+      p_payment_method: payload.paymentMethod || payload.method || null,
+
+      p_payment_reference:
+        payload.paymentReference ||
+        payload.momoNumber ||
+        null,
+
+      p_payment_note: payload.paymentNote || payload.note || null
+    });
+
+    if (error) throw error;
+
+    return data;
+  }
+
+  // Compatibility wrapper for older invoice UI.
+  async function recordPartialPayment(
+    invoiceId,
+    amount,
+    method,
+    reference,
+    note
+  ) {
+    const data = await recordPayment(
+      invoiceId,
+      amount,
+      method,
+      reference,
+      note
+    );
+
+    return {
+      data,
+      error: null
+    };
+  }
+
+  async function updateInvoiceNoStock() {
+    unsupported('Editing existing invoices');
+  }
+
+  async function softDeleteInvoiceNoStock() {
+    unsupported('Cancelling invoices');
+  }
+
+  // ----------------------------------------------------------
+  // REPORTS
+  // ----------------------------------------------------------
+
+  async function loadOutstandingBalances() {
+    const sb = requireClient();
+
+    const { data, error } = await sb
+      .from('invoices')
+      .select(`
+        id,
+        invoice_number,
+        branch_id,
+        customer_id,
+        total_amount,
+        amount_paid,
+        balance_due,
+        invoice_date
+      `)
+      .gt('balance_due', 0)
+      .neq('status', 'cancelled')
+      .order('invoice_date', { ascending: true });
+
+    if (error) throw error;
+
+    return data || [];
+  }
+
+  async function loadSalesBreakdown() {
+    unsupported('Product sales breakdown reports');
+  }
+
+  // ----------------------------------------------------------
+  // STOCK HISTORY
+  // ----------------------------------------------------------
+
   async function loadStockHistory() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
+    const sb = requireClient();
 
     const { data, error } = await sb
       .from('stock_history')
-      .select('id, product_id, product_name, location, change, type, created_by, created_at')
+      .select(`
+        id,
+        branch_id,
+        product_id,
+        movement_type,
+        quantity_change,
+        quantity_before,
+        quantity_after,
+        related_invoice_id,
+        reason,
+        created_by,
+        created_at
+      `)
       .order('created_at', { ascending: false })
       .limit(2000);
 
     if (error) throw error;
 
+    return data || [];
+  }
+
+  // ----------------------------------------------------------
+  // AUDIT LOGS
+  // ----------------------------------------------------------
+
+    // ----------------------------------------------------------
+  // AUDIT LOGS
+  // ----------------------------------------------------------
+
+  async function logAudit(action, details = {}) {
+    const sb = requireClient();
+
+    const payload = details && typeof details === 'object'
+      ? details
+      : { description: String(details || '') };
+
+    const { data, error } = await sb.rpc('mra_log_audit', {
+      p_action: String(action || ''),
+      p_details: payload,
+      p_table_name: payload.table_name || null,
+      p_record_id: payload.record_id || null
+    });
+
+    if (error) throw error;
+
+    return data;
+  }
+
+  async function loadAuditLogs() {
+    const sb = requireClient();
+
+    const [{ data, error }, { data: profiles }] = await Promise.all([
+      sb
+        .from('audit_logs')
+        .select('id, user_id, action, table_name, record_id, details, created_at')
+        .order('created_at', { ascending: false })
+        .limit(1000),
+      sb
+        .from('profiles')
+        .select('id, full_name')
+    ]);
+
+    if (error) throw error;
+
+    const profileNames = Object.fromEntries(
+      (profiles || []).map(profile => [profile.id, profile.full_name])
+    );
+
     return (data || []).map(row => ({
-      id:          row.id,
-      productId:   row.product_id   || '',
-      productName: row.product_name || '',
-      location:    row.location     || '',
-      change:      Number(row.change || 0),
-      type:        row.type         || '',
-      by:          row.created_by   || '',
-      byName:      row.created_by   || '',
-      note:        '',
-      createdAt:   row.created_at ? new Date(row.created_at).getTime() : Date.now()
+      ...row,
+      created_by_name: profileNames[row.user_id] || 'system'
     }));
   }
 
-  // ============================================================
-  // FIX BUG 1: updateInvoiceNoStock
-  // The RPC doesn't exist — use a safe fallback that ONLY touches
-  // invoice_items when items are explicitly being changed (not on mark-paid)
-  // ============================================================
-  async function updateInvoiceNoStock(id, updates) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
+  // ----------------------------------------------------------
+  // STAFF ACCOUNTS
+  // ----------------------------------------------------------
 
-    // Build items ONLY when explicitly editing items (not when marking paid).
-    // _itemsChanged=false → pass null → RPC skips invoice_items entirely.
-    const rpcItems = updates._itemsChanged
-      ? (updates.items || [])
-          .filter(it => it.name && Number(it.qty) > 0 && Number(it.price) > 0)
-          .map(it => ({
-            name:      String(it.name  || ''),
-            qty:       Number(it.qty   || 0),
-            price:     Number(it.price || 0),
-            sale_type: it.priceType || it.sale_type || 'retail'
-          }))
-      : null;
+  async function createStaffAccount(payload = {}) {
+    const sb = requireClient();
 
-    const { data, error } = await sb.rpc('update_invoice_no_stock', {
-      p_invoice_id:       id,
-      p_customer_name:    updates.customerName    || null,
-      p_customer_phone:   updates.customerPhone   || null,
-      p_customer_address: updates.customerAddress || null,
-      p_status:           updates.status          || 'pending',
-      p_pay_method:       updates.status === 'paid' ? (updates.payMethod  || null) : null,
-      p_momo_number:      updates.status === 'paid' ? (updates.momoNumber || null) : null,
-      p_notes:            updates.notes           || null,
-      p_subtotal:         updates.subtotal        != null ? Number(updates.subtotal) : null,
-      p_total:            updates.total           != null ? Number(updates.total)    : null,
-      p_items:            rpcItems
-    });
+    const body = {
+      email: String(payload.email || '')
+        .trim()
+        .toLowerCase(),
 
-    if (error) {
-      console.error('update_invoice_no_stock RPC error:', error);
-      return { data: null, error };
+      fullName: String(
+        payload.fullName ||
+        payload.full_name ||
+        ''
+      ).trim(),
+
+      role: payload.role === 'admin' || payload.role === 'warehouse_manager'
+        ? payload.role
+        : 'staff',
+      location: String(payload.location || '').trim(),
+
+      branchIds: Array.from(new Set(
+        (payload.branchIds || payload.branch_ids || [])
+          .map(value => String(value || '').trim())
+          .filter(Boolean)
+      ))
+    };
+    body.branch_ids = body.branchIds;
+    body.username = String(
+      payload.username ||
+      body.email.split('@')[0].replace(/[^a-z0-9_]/gi, '_').toLowerCase()
+    ).slice(0, 20);
+
+    if (!body.email || !body.fullName) {
+      throw new Error('Staff name and email are required.');
     }
 
-    return { data, error: null };
+    if (!Array.isArray(body.branchIds) || !body.branchIds.length) {
+      throw new Error(
+        'Assign the staff member to at least one branch.'
+      );
+    }
+
+    const { data, error } = await sb.functions.invoke(
+      'create-staff-account',
+      { body }
+    );
+
+    if (error) {
+      let reason = error.message;
+
+      try {
+        const response = await error.context?.json();
+
+        if (response?.error) {
+          reason = response.error;
+        }
+      } catch (_) {}
+
+      throw new Error(reason);
+    }
+
+    return data;
   }
 
-  // ============================================================
-  // Approval-gated invoice edits (item removal / discount requests)
-  // ============================================================
+  // ----------------------------------------------------------
+  // LEGACY FEATURES NOT IMPLEMENTED IN MRA
+  // ----------------------------------------------------------
+
+  async function anyAdminExists() {
+    // MRA admin account has already been created.
+    return true;
+  }
+
+  async function createBootstrapAdmin() {
+    unsupported('Bootstrap administrator creation');
+  }
+
+  async function completePasswordChange() {
+    // Ordinary Supabase Auth password changes are handled separately.
+    return true;
+  }
+
   async function loadInvoiceEditRequests() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
+    const sb = requireClient();
+
     const { data, error } = await sb
       .from('invoice_edit_requests')
-      .select('*, profiles:requested_by(full_name, username, location), invoices:invoice_id(number, customer_name, location)')
+      .select(`
+        *,
+        profiles:requested_by (full_name, location),
+        invoices:invoice_id (number, customer_name)
+      `)
       .eq('status', 'pending')
-      .order('requested_at', { ascending: false });
+      .order('requested_at', { ascending: true });
+
     if (error) throw error;
     return data || [];
   }
 
-  async function approveInvoiceRequest(requestId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('approve_invoice_request', { p_request_id: requestId });
-    if (error) {
-      console.error('approve_invoice_request RPC error:', error);
-      return { data: null, error };
-    }
-    return { data, error: null };
-  }
-
-  async function rejectInvoiceRequest(requestId, reason) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('reject_invoice_request', { p_request_id: requestId, p_reason: reason || null });
-    if (error) {
-      console.error('reject_invoice_request RPC error:', error);
-      return { data: null, error };
-    }
-    return { data, error: null };
-  }
-
-    // ============================================================
-  // WAREHOUSE
-  // ============================================================
-  async function postWarehouseMovementDirect(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.rpc('post_warehouse_movement_direct', {
-      p_type:            payload.type,
-      p_description:     payload.description     || null,
-      p_cartons:         Number(payload.cartons  || 0),
-      p_items:           Array.isArray(payload.items) ? payload.items : [],
-      p_requisition_no:  payload.requisition_no  || null,
-      p_issue_to:        payload.issue_to        || null,
-      p_storekeeper:     payload.storekeeper     || null,
-      p_supplier:        payload.supplier        || null,
-      p_notes:           payload.notes           || null,
-      p_created_by_name: payload.created_by_name || null,
-      p_warehouse_id:    payload.warehouse_id    || null,
-      p_to_warehouse_id: payload.to_warehouse_id || null
-    });
+  async function approveInvoiceRequest(id) {
+    const { data, error } = await requireClient().rpc(
+      'approve_invoice_request',
+      { p_request_id: id }
+    );
     if (error) throw error;
     return data;
   }
 
-  async function loadWarehouseStockBalance(warehouseId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    let query = sb.from('warehouse_stock_balance').select('*').order('updated_at', { ascending: false });
-    if (warehouseId) query = query.eq('warehouse_id', warehouseId);
-    const { data, error } = await query;
-    if (error) throw error;
-    return data || [];
-  }
-
-  async function saveWarehouseStockOut(payload) { return postWarehouseMovementDirect({ ...payload, type: 'stock_out' }); }
-  async function saveWarehouseMovement(payload)  { return postWarehouseMovementDirect(payload); }
-
-  async function saveWarehouseProduct(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    // NOTE: warehouse_products only has id/name/sku/category/cartons/
-    // reorder_level/created_at — no code/created_by/created_by_name/updated_at.
-    const row = {
-      name:          payload.name,
-      sku:           payload.sku || payload.code || null,
-      category:      payload.category || 'General',
-      reorder_level: Number(payload.reorder || payload.reorder_level || 0)
-    };
-    if (payload.id) row.id = payload.id;
-    const { data, error } = await sb.from('warehouse_products')
-      .upsert(row, { onConflict: row.id ? 'id' : 'sku' })
-      .select().single();
+  async function rejectInvoiceRequest(id, reason = null) {
+    const { data, error } = await requireClient().rpc(
+      'reject_invoice_request',
+      { p_request_id: id, p_reason: reason }
+    );
     if (error) throw error;
     return data;
   }
 
-  async function deleteWarehouseProduct(id) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error } = await sb.from('warehouse_products').delete().eq('id', id);
-    if (error) throw error;
-    return true;
+  async function linkCatalogItem() {
+    unsupported('Warehouse catalog linking');
   }
 
-  async function saveWarehouseSupplier(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const row = {
-      name:            payload.name,
-      phone:           payload.phone    || null,
-      location:        payload.location || null,
-      notes:           payload.notes    || null,
-      created_by:      payload.created_by || null,
-      created_by_name: payload.created_by_name || null,
-      updated_at:      new Date().toISOString()
-    };
-    if (payload.id) row.id = payload.id;
-    const { data, error } = await sb.from('warehouse_suppliers')
-      .upsert(row, { onConflict: row.id ? 'id' : 'name' })
-      .select().single();
-    if (error) throw error;
-    return data;
+  async function backfillWarehouseCatalog() {
+    unsupported('Warehouse catalog migration');
   }
 
-  async function deleteWarehouseSupplier(id) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error } = await sb.from('warehouse_suppliers').delete().eq('id', id);
-    if (error) throw error;
-    return true;
+  // Old warehouse methods are intentionally disabled.
+  async function postWarehouseMovementDirect() {
+    unsupported('Warehouse movements');
   }
 
-  async function loadWarehouseMovements(warehouseId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    let query = sb.from('warehouse_movements').select('*').order('created_at', { ascending: false });
-    if (warehouseId) query = query.eq('warehouse_id', warehouseId);
-    const { data, error } = await query;
-    if (error) throw error;
-    return data || [];
+  async function loadWarehouseStockBalance() {
+    unsupported('Warehouse stock balance');
   }
 
-  // ============================================================
-  // WAREHOUSES (locations) + staff assignment
-  // ============================================================
-  async function loadWarehouses() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('warehouses').select('*').order('name', { ascending: true });
-    if (error) throw error;
-    return data || [];
+  async function saveWarehouseStockOut() {
+    unsupported('Warehouse stock-out');
   }
 
-  async function saveWarehouse(payload) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const row = {
-      code:   payload.code,
-      name:   payload.name,
-      address: payload.address || null,
-      active: payload.active != null ? !!payload.active : true
-    };
-    if (payload.id) row.id = payload.id;
-    const { data, error } = await sb.from('warehouses')
-      .upsert(row, { onConflict: row.id ? 'id' : 'code' })
-      .select().single();
-    if (error) throw error;
-    return data;
+  async function saveWarehouseMovement() {
+    unsupported('Warehouse movements');
   }
 
-  async function deleteWarehouse(id) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error } = await sb.from('warehouses').delete().eq('id', id);
-    if (error) throw error;
-    return true;
+  async function saveWarehouseProduct() {
+    unsupported('Separate warehouse products');
   }
 
-  async function loadWarehouseStaffAssignments() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('warehouse_staff_assignments').select('*');
-    if (error) throw error;
-    return data || [];
+  async function deleteWarehouseProduct() {
+    unsupported('Separate warehouse products');
   }
 
-  async function assignStaffToWarehouse(profileId, warehouseId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('warehouse_staff_assignments')
-      .upsert({ profile_id: profileId, warehouse_id: warehouseId }, { onConflict: 'profile_id,warehouse_id' })
-      .select().single();
-    if (error) throw error;
-    return data;
+  async function saveWarehouseSupplier() {
+    unsupported('Warehouse suppliers');
   }
 
-  async function removeStaffFromWarehouse(profileId, warehouseId) {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { error } = await sb.from('warehouse_staff_assignments')
-      .delete().eq('profile_id', profileId).eq('warehouse_id', warehouseId);
-    if (error) throw error;
-    return true;
+  async function deleteWarehouseSupplier() {
+    unsupported('Warehouse suppliers');
+  }
+
+  async function loadWarehouseMovements() {
+    return [];
   }
 
   async function loadWarehouseProducts() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('warehouse_products').select('*').order('created_at', { ascending: false });
-    if (error) throw error;
-    return data || [];
+    return [];
   }
 
   async function loadWarehouseSuppliers() {
-    const sb = getClient();
-    if (!sb) throw new Error('Supabase is not configured.');
-    const { data, error } = await sb.from('warehouse_suppliers').select('*').order('created_at', { ascending: false });
+    return [];
+  }
+
+  // MRA branches replace the old warehouse concept.
+  async function loadWarehouses() {
+    return loadBranches();
+  }
+
+  async function saveWarehouse(payload = {}) {
+    const sb = requireClient();
+    const code = String(payload.code || '').trim();
+    const name = String(payload.name || '').trim();
+    if (!code || !name) throw new Error('Warehouse code and name are required.');
+
+    const values = {
+      branch_code: code,
+      branch_name: name,
+      address: String(payload.address || '').trim() || null,
+      is_active: payload.active !== false
+    };
+
+    const query = payload.id
+      ? sb.from('branches').update(values).eq('id', payload.id)
+      : sb.from('branches').insert(values);
+    const { data, error } = await query.select().single();
+    if (error) throw error;
+    return {
+      id: data.id,
+      code: data.branch_code,
+      name: data.branch_name,
+      address: data.address || '',
+      active: data.is_active !== false
+    };
+  }
+
+  async function deleteWarehouse(id) {
+    if (!id) throw new Error('Warehouse ID is required.');
+    const { data, error } = await requireClient()
+      .from('branches')
+      .update({ is_active: false })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  async function loadWarehouseStaffAssignments(warehouseId = null) {
+    let query = requireClient()
+      .from('user_branch_access')
+      .select('id, user_id, branch_id, profiles:user_id (full_name, email)');
+    if (warehouseId) query = query.eq('branch_id', warehouseId);
+    const { data, error } = await query;
     if (error) throw error;
     return data || [];
   }
 
-  // ============================================================
+  async function assignStaffToWarehouse(payload = {}) {
+    const userId = payload.userId || payload.user_id;
+    const branchId = payload.warehouseId || payload.branch_id;
+    if (!userId || !branchId) throw new Error('Staff and warehouse are required.');
+    const { data, error } = await requireClient()
+      .from('user_branch_access')
+      .upsert({ user_id: userId, branch_id: branchId }, {
+        onConflict: 'user_id,branch_id',
+        ignoreDuplicates: true
+      })
+      .select()
+      .maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+
+  async function removeStaffFromWarehouse(payload = {}) {
+    const userId = payload.userId || payload.user_id;
+    const branchId = payload.warehouseId || payload.branch_id;
+    if (!userId || !branchId) throw new Error('Staff and warehouse are required.');
+    const { error } = await requireClient()
+      .from('user_branch_access')
+      .delete()
+      .eq('user_id', userId)
+      .eq('branch_id', branchId);
+    if (error) throw error;
+  }
+
+  // ----------------------------------------------------------
   // EXPORT
-  // ============================================================
-  window.LumodaSupabase = {
+  // ----------------------------------------------------------
+
+  const api = {
     init,
     getClient,
     isConfigured,
 
+    // Authentication
     getSession,
+    getCurrentUser,
     getRawStoredSession,
     clearRawStoredSession,
+    getCachedSessionUser,
+    cacheSessionUser,
+    clearCachedSessionUser,
     getProfile,
+    getMyProfile,
+    updateMyProfile,
     getProfileByUsername,
+    signIn,
+    sendPasswordResetEmail,
+    signOut,
+    recordLogin,
+
+    // Business
     loadBusinessSettings,
     saveBusinessSettings,
     markOnboardingSeen,
@@ -927,46 +1569,63 @@
     uploadLogo,
     saveLogoUrl,
 
-    signIn,
-    signOut,
+    // Branches
+    loadBranches,
+    loadUserBranches,
+    saveBranch,
+    deleteBranch,
+    deactivateBranch,
+    reactivateBranch,
 
+    // Categories and products
+    loadCategories,
     loadProducts,
+    saveProduct,
+    adjustProductStock,
+    importProducts,
+
+    // Customers
     loadCustomers,
+    saveCustomer,
+
+    // Invoices and payments
     loadInvoices,
     loadInvoiceById,
-    loadProfiles,
-    recordLogin,
-
+    createInvoice,
     createInvoiceNoStock,
     updateInvoiceNoStock,
     softDeleteInvoiceNoStock,
+    recordPayment,
     recordPartialPayment,
 
-    loadInvoiceEditRequests,
-    approveInvoiceRequest,
-    rejectInvoiceRequest,
-
+    // Reports
     loadSalesBreakdown,
     loadOutstandingBalances,
 
-    importProducts,
-    saveProduct,
-    adjustProductStock,
-    linkCatalogItem,
-    backfillWarehouseCatalog,
+    // Stock history
+    loadStockHistory,
+    logStockHistory,
 
-    // FIX BUG 3: audit + stock history
+    // Audit
     logAudit,
     loadAuditLogs,
-    logStockHistory,
-    loadStockHistory,
 
+    // Staff
+    loadProfiles,
     createStaffAccount,
     anyAdminExists,
     createBootstrapAdmin,
     completePasswordChange,
 
-    // Warehouse
+    // Legacy methods retained temporarily
+    loadInvoiceEditRequests,
+    approveInvoiceRequest,
+    rejectInvoiceRequest,
+    linkCatalogItem,
+    backfillWarehouseCatalog,
+
+    postWarehouseMovementDirect,
+    loadWarehouseStockBalance,
     saveWarehouseStockOut,
     saveWarehouseMovement,
     saveWarehouseProduct,
@@ -976,9 +1635,6 @@
     loadWarehouseMovements,
     loadWarehouseProducts,
     loadWarehouseSuppliers,
-    postWarehouseMovementDirect,
-    loadWarehouseStockBalance,
-
     loadWarehouses,
     saveWarehouse,
     deleteWarehouse,
@@ -986,4 +1642,8 @@
     assignStaffToWarehouse,
     removeStaffFromWarehouse
   };
+
+  window.MRAApi = api;
+  window.LumodaSupabase = api;
+
 })();

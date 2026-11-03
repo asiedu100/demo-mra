@@ -1,4 +1,4 @@
-// Lumoda staff app — offline app-shell cache.
+// MRA Systems staff app — offline app-shell cache.
 //
 // Strategy: network-first for everything in this app, falling back to the
 // cache only when the network fetch actually fails. Staff always get the
@@ -9,7 +9,7 @@
 //
 // Bump CACHE_NAME whenever the shell file list below changes so old caches
 // get cleared out on the next activate.
-const CACHE_NAME = 'lumoda-shell-v1';
+const CACHE_NAME = 'mra-shell-v12';
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
 
 const APP_SHELL = [
@@ -20,18 +20,20 @@ const APP_SHELL = [
   './supabase-config.js',
   './supabase-client.js',
   './warehouse.js',
-  './js/core.js',
-  './js/auth.js',
+  './js/core.js?v=3',
+  './js/auth.js?v=3',
+  './js/admin.js?v=2',
+  '../MRA.png?v=2',
+  './js/invoice-domain.js?v=1',
   './js/invoices.js',
   './js/customers.js',
   './js/products.js',
   './js/dashboard.js',
   './js/reports.js',
   './js/admin.js',
-  './js/settings.js',
+  './js/settings.js?v=2',
   './js/bootstrap.js',
-  './icons/icon-192.png',
-  './icons/icon-512.png',
+  '../MRA.png',
   SDK_URL
 ];
 

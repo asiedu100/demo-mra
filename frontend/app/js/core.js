@@ -1,560 +1,1193 @@
 // ============================================================
-// LUMODA ENTERPRISE - app.js v2.1 (FIXED)
-// Fixes:
-//  1. Mark as Paid now reflects immediately in modal
-//  2. Newly added products appear in invoice line item search
-//  3. Share invoice works on all platforms with fallback
-//  4. Removed duplicate restoreSession IIFE (race condition)
-//  5. Quantity field starts empty — user types it
-//  6. Edit invoice products now show correctly after save
+// MRA SYSTEMS - CORE.JS
+// Adapted from Lumoda Enterprise
 // ============================================================
 
 // ---- CONSTANTS ----
-const INACTIVITY_MS      = 5 * 60 * 1000;
-const WARNING_MS         = 60 * 1000;
-const MAX_FAILED_LOGINS  = 5;
-const LOCKOUT_MS         = 15 * 60 * 1000;
-const TEMP_PW_EXPIRY_MS  = 24 * 60 * 60 * 1000;
-// How long a cached session stays trusted for offline startup after its
-// last successful online verification, before requiring a fresh connection.
-const OFFLINE_AUTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-// How long a queued sale may keep failing specifically on stale-auth
-// grounds (server reachable, session just not valid — see
-// isAuthTokenStaleError) before it's escalated to needsReview instead of
-// being retried forever. Measured in CONNECTED time (getCumulativeOnlineMs
-// below), not wall-clock time — a device genuinely offline over a long
-// weekend must not escalate a perfectly good queued sale just because
-// wall-clock hours passed; only time actually spent online while the
-// retry kept failing counts.
-const STALE_TOKEN_RETRY_LIMIT_MS = 24 * 60 * 60 * 1000;
+const INACTIVITY_MS = 5 * 60 * 1000;
+const WARNING_MS = 60 * 1000;
 
-// ---- CUMULATIVE ONLINE TIME ----
-// Tracks total time this device has spent online, persisted so it
-// survives reloads. This is what STALE_TOKEN_RETRY_LIMIT_MS is measured
-// against — see markOnlineTransition (wired in bootstrap.js) for how it
-// accrues only while navigator.onLine is actually true.
+// Offline invoice creation is intentionally not enabled.
+// Invoices must be created through the secure Supabase RPC.
+const OFFLINE_INVOICES_ENABLED = false;
+
+// ---- LOCAL STORAGE ----
+// All physical keys are isolated under mra_.
+// The lumoda_ compatibility mapping allows older modules to
+// continue using their existing logical key names temporarily.
+function mraStorageKey(key) {
+  const cleanKey = String(key || '');
+  if (cleanKey.startsWith('mra_')) return cleanKey;
+  if (cleanKey.startsWith('lumoda_')) {
+    return 'mra_' + cleanKey.substring('lumoda_'.length);
+  }
+  return 'mra_' + cleanKey;
+}
+
+const LS = {
+  get(key) {
+    try {
+      const value = localStorage.getItem(mraStorageKey(key));
+      return value === null ? null : JSON.parse(value);
+    } catch (error) {
+      console.warn('Local storage read failed:', key, error);
+      return null;
+    }
+  },
+
+  set(key, value) {
+    try {
+      localStorage.setItem(mraStorageKey(key), JSON.stringify(value));
+      return true;
+    } catch (error) {
+      console.error('Local storage write failed:', key, error);
+      return false;
+    }
+  },
+
+  del(key) {
+    try {
+      localStorage.removeItem(mraStorageKey(key));
+    } catch (error) {
+      console.warn('Local storage removal failed:', key, error);
+    }
+  }
+};
+
+const SS = {
+  get(key) {
+    try {
+      const value = sessionStorage.getItem(mraStorageKey(key));
+      return value === null ? null : JSON.parse(value);
+    } catch {
+      return null;
+    }
+  },
+
+  set(key, value) {
+    try {
+      sessionStorage.setItem(mraStorageKey(key), JSON.stringify(value));
+    } catch (error) {
+      console.warn('Session storage write failed:', error);
+    }
+  },
+
+  del(key) {
+    try {
+      sessionStorage.removeItem(mraStorageKey(key));
+    } catch {}
+  }
+};
+
+// ---- APPLICATION STATE ----
+let currentUser = null;
+
+// currentLocation now represents a branch ID, not a branch name.
+// "All" is available to administrators when viewing consolidated data.
+let currentLocation = 'All';
+
+let editingProductId = null;
+let viewingInvoiceId = null;
+let editingInvoiceId = null;
+let lineItemCount = 0;
+let invoiceSaving = false;
+let invoiceLastSubmissionSignature = null;
+let invoiceClientRef = null;
+let editInvoiceSaving = false;
+let isOfflineSession = false;
+let authGeneration = 0;
+
+let inactivityTimer = null;
+let warningTimer = null;
+let countdownInterval = null;
+
 let onlineSinceMark = navigator.onLine ? Date.now() : null;
 
+let branches = [];
+let LOCATIONS = [];
+
+// Other modules use these shared variables.
+// They are retained temporarily for compatibility.
+let productSearch = '';
+let customerSearchFilter = '';
+let cashSalesFilter = '';
+let invoiceFilter = { text: '', status: '' };
+let balanceSearch = '';
+let warehouseMovementFilter = {
+  search: '',
+  type: 'all',
+  status: 'all'
+};
+let editingWarehouseId = null;
+let editingSupplierId = null;
+let warehouseTransferItems = [];
+let topCustomersSortMode = 'spend';
+let reportsInvoicesCache = [];
+let reportsSalesCache = [];
+let catalogLinkCandidates = [];
+let catalogLinkRemainingCount = 0;
+
+// ============================================================
+// SUPABASE CLIENT ACCESS
+// ============================================================
+
+// supabase-client.js currently retains LumodaSupabase as a
+// compatibility name. Prefer MRASupabase when available.
+function getSupabaseAPI() {
+  return window.MRAApi || window.MRASupabase || window.LumodaSupabase || null;
+}
+
+function isSupabaseConfigured() {
+  const api = getSupabaseAPI();
+
+  try {
+    return !!(
+      api &&
+      typeof api.isConfigured === 'function' &&
+      api.isConfigured()
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================
+// ONLINE TIME
+// ============================================================
+
 function getCumulativeOnlineMs() {
-  const base = LS.get('lumoda_cumulative_online_ms') || 0;
-  return (navigator.onLine && onlineSinceMark) ? base + (Date.now() - onlineSinceMark) : base;
+  const base = Number(LS.get('cumulative_online_ms')) || 0;
+
+  return (
+    navigator.onLine && onlineSinceMark
+      ? base + (Date.now() - onlineSinceMark)
+      : base
+  );
 }
 
 function markOnlineTransition(isOnline) {
   if (isOnline) {
-    onlineSinceMark = Date.now();
-  } else if (onlineSinceMark) {
-    LS.set('lumoda_cumulative_online_ms', (LS.get('lumoda_cumulative_online_ms') || 0) + (Date.now() - onlineSinceMark));
+    if (!onlineSinceMark) onlineSinceMark = Date.now();
+    return;
+  }
+
+  if (onlineSinceMark) {
+    const total =
+      (Number(LS.get('cumulative_online_ms')) || 0) +
+      (Date.now() - onlineSinceMark);
+
+    LS.set('cumulative_online_ms', total);
     onlineSinceMark = null;
   }
 }
 
-// ---- STATE ----
-let currentUser       = null;
-let currentLocation   = 'All';
-let editingProductId  = null;
-let viewingInvoiceId  = null;
-let lineItemCount     = 0;
-let invoiceSaving     = false;
-let editInvoiceSaving = false;
-// True when the current session was restored from a cached, not-yet-
-// reverified login (device was offline at startup) rather than a fresh
-// server-confirmed one. Drives the offline-session banner; cleared once
-// reconnect revalidation succeeds.
-let isOfflineSession  = false;
-// Bumped every time the authenticated user changes (login, logout, or
-// session restore). Any in-flight fetch that writes fetched data back to
-// localStorage (syncSupabaseCache, syncSingleInvoice) captures this value
-// when it starts and re-checks it right before writing — if it no longer
-// matches, a different user is active now and the response is stale, so
-// it's discarded instead of silently overwriting that user's fresh data.
-let authGeneration = 0;
+// ============================================================
+// USER / ROLE HELPERS
+// ============================================================
 
-// Shows/hides the "working offline on a saved login" banner to match
-// isOfflineSession — called wherever that flag changes.
-function updateOfflineSessionBanner() {
-  const el = document.getElementById('offline-session-banner');
-  if (el) el.style.display = isOfflineSession ? 'block' : 'none';
-}
+// MRA authentication is managed by Supabase Auth.
+// This function only normalizes profile data returned by the server.
+function normalizeUser(user) {
+  if (!user) return null;
 
-// Single source of truth for branch names. Dropdowns/filter tabs are
-// re-rendered from this list (see renderLocationSelects()) instead of each
-// hardcoding its own <option> set, so adding a branch here is one line —
-// though product stock (stockAlabar/stockMorocco) is still fixed-column and
-// NOT covered by this: that needs a real schema migration, not a JS change.
-const LOCATIONS = ['Alabar', 'Morocco'];
-let inactivityTimer   = null;
-let warningTimer      = null;
-let countdownInterval = null;
-let _lastTempPw       = '';
-
-// ---- LOCAL STORAGE ----
-const LS = {
-  get: k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
-  set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
-  del: k => localStorage.removeItem(k),
-};
-const SS = {
-  get: k => { try { return JSON.parse(sessionStorage.getItem(k)); } catch { return null; } },
-  set: (k, v) => sessionStorage.setItem(k, JSON.stringify(v)),
-  del: k => sessionStorage.removeItem(k),
-};
-
-// ---- HASH ----
-function hashPw(pw) {
-  let h = 5381;
-  for (let i = 0; i < pw.length; i++) h = ((h << 5) + h) ^ pw.charCodeAt(i);
-  return (h >>> 0).toString(16).padStart(8, '0');
-}
-
-function legacyHashPw(pw) {
-  let h = 0;
-  for (let i = 0; i < pw.length; i++) h = ((h << 5) - h + pw.charCodeAt(i)) | 0;
-  return h.toString(16);
-}
-
-function genToken() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2,'0')).join('');
-}
-
-function normalizeUser(user, index) {
-  const username = String(user.username || '').trim().toLowerCase();
-  const role = ['admin', 'warehouse_manager'].includes(user.role) ? user.role : 'staff';
   return {
-    id: user.id || (username === 'admin' ? 'u_admin' : 'u_' + (username || index)),
-    username,
-    fullName: user.fullName || (username === 'admin' ? 'System Administrator' : username.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())),
-    passwordHash: user.passwordHash || null,
-    role,
-    location: role === 'admin' ? 'All' : (user.location || (username === 'mary' ? 'Morocco' : 'Alabar')),
-    active: user.active !== false,
-    mustChangePassword: !!user.mustChangePassword,
-    tempPasswordExpiry: user.tempPasswordExpiry || null,
-    failedLogins: user.failedLogins || 0,
-    lockedUntil: user.lockedUntil || null,
-    createdAt: user.createdAt || Date.now(),
-    createdBy: user.createdBy || 'system',
-    lastLogin: user.lastLogin || null,
+    id: user.id || null,
+    fullName:
+      user.fullName ||
+      user.full_name ||
+      user.email ||
+      'User',
+    email: user.email || '',
+    role: user.role === 'admin' ? 'admin' : 'staff',
+    active:
+      user.active !== undefined
+        ? user.active !== false
+        : user.is_active !== false,
+    branchIds: Array.isArray(user.branchIds)
+      ? user.branchIds
+      : Array.isArray(user.branch_ids)
+        ? user.branch_ids
+        : []
   };
 }
 
+function isAdmin() {
+  return !!currentUser && currentUser.role === 'admin';
+}
+
+function isStaff() {
+  return !!currentUser && currentUser.role === 'staff';
+}
+
+// No local user creation or local password authentication.
 function ensureUsers() {
-  let users = LS.get('lumoda_users');
-  if (!Array.isArray(users)) {
-    users = [];
-  } else {
-    users = users.map(normalizeUser).filter(u => u.username);
-  }
-  LS.set('lumoda_users', users);
+  const users = LS.get('users');
+  if (!Array.isArray(users)) LS.set('users', []);
+}
+
+function getUsers() {
+  return LS.get('users') || [];
+}
+
+function getSessions() {
+  // Supabase manages authentication sessions.
+  return [];
 }
 
 // ============================================================
-// DATA INIT
+// DATA INITIALIZATION
 // ============================================================
+
+// Deliberately does not seed sample products, customers, invoices,
+// branches or users. MRA data must come from its own database.
 function initData() {
-  if (!LS.get('lumoda_products')) {
-    LS.set('lumoda_products', [
-      {id:'p1', name:'Blender', sku:'BLN-001', category:'Appliances', price:250, wholesalePrice:220, cartonPrice:200, stockAlabar:15, stockMorocco:10, reorder:5},
-      {id:'p2', name:'Cooking Pot (Large)', sku:'CPL-002', category:'Cookware', price:80, wholesalePrice:70, cartonPrice:65, stockAlabar:30, stockMorocco:20, reorder:8},
-      {id:'p3', name:'Frying Pan', sku:'FPN-003', category:'Cookware', price:45, wholesalePrice:40, cartonPrice:36, stockAlabar:25, stockMorocco:12, reorder:5},
-      {id:'p4', name:'Kitchen Knife Set', sku:'KKS-004', category:'Cutlery', price:120, wholesalePrice:105, cartonPrice:95, stockAlabar:8, stockMorocco:4, reorder:5},
-      {id:'p5', name:'Mixing Bowl Set', sku:'MBS-005', category:'Bakeware', price:60, wholesalePrice:52, cartonPrice:48, stockAlabar:20, stockMorocco:15, reorder:5},
-      {id:'p6', name:'Spatula Set', sku:'SPS-006', category:'Utensils', price:35, wholesalePrice:30, cartonPrice:27, stockAlabar:40, stockMorocco:30, reorder:10},
-      {id:'p7', name:'Measuring Cups', sku:'MCU-007', category:'Bakeware', price:25, wholesalePrice:22, cartonPrice:19, stockAlabar:3, stockMorocco:2, reorder:8},
-      {id:'p8', name:'Cutting Board', sku:'CTB-008', category:'Utensils', price:40, wholesalePrice:35, cartonPrice:31, stockAlabar:18, stockMorocco:10, reorder:5},
-      {id:'p9', name:'Pressure Cooker', sku:'PRC-009', category:'Appliances', price:180, wholesalePrice:158, cartonPrice:145, stockAlabar:6, stockMorocco:4, reorder:3},
-      {id:'p10', name:'Food Steamer', sku:'FST-010', category:'Appliances', price:95, wholesalePrice:83, cartonPrice:76, stockAlabar:2, stockMorocco:1, reorder:5},
-    ]);
-  }
-  if (!LS.get('lumoda_invoices'))      LS.set('lumoda_invoices', []);
-  if (!LS.get('lumoda_customers'))     LS.set('lumoda_customers', []);
-  if (!LS.get('lumoda_stockhistory'))  LS.set('lumoda_stockhistory', []);
-  if (!LS.get('lumoda_audit'))         LS.set('lumoda_audit', []);
-  if (!LS.get('lumoda_invoice_seq'))   LS.set('lumoda_invoice_seq', 2388);
-  if (!LS.get('lumoda_sessions'))      LS.set('lumoda_sessions', []);
-  ensureUsers();
+  const defaults = {
+    products: [],
+    invoices: [],
+    customers: [],
+    stockhistory: [],
+    audit: [],
+    users: []
+  };
+
+  Object.entries(defaults).forEach(([key, value]) => {
+    if (!Array.isArray(LS.get(key))) {
+      LS.set(key, value);
+    }
+  });
 }
 
-// Resets everything that could otherwise leak between two different users
-// signed into the same browser: cached business data pulled while the
-// previous user was signed in, in-progress search/filter/sort state, and
-// which record a modal was pointed at. Called on every login, logout, and
-// session restore (see authGeneration above for the matching guard against
-// a slow, still-in-flight response silently undoing this afterward).
-//
-// Deliberately left alone: lumoda_business_settings (branding/currency —
-// genuinely business-wide, not per-user) and the offline sales queue
-// (queued sales must survive a user switch on this device so they still
-// sync once back online).
-function clearUserScopedState() {
-  LS.del('lumoda_invoices');
-  LS.del('lumoda_products');
-  LS.del('lumoda_customers');
-  LS.del('lumoda_stockhistory');
-  LS.del('lumoda_audit');
+// ============================================================
+// USER-SCOPED CACHE RESET
+// ============================================================
 
-  currentLocation      = 'All';
-  editingProductId     = null;
-  viewingInvoiceId     = null;
-  productSearch        = '';
+function clearUserScopedState() {
+  [
+    'invoices',
+    'products',
+    'customers',
+    'stockhistory',
+    'audit',
+    'users'
+  ].forEach(key => LS.del(key));
+
+  currentLocation = 'All';
+
+  editingProductId = null;
+  viewingInvoiceId = null;
+  editingInvoiceId = null;
+
+  productSearch = '';
   customerSearchFilter = '';
-  cashSalesFilter      = '';
-  invoiceFilter        = { text: '', status: '' };
-  editingInvoiceId     = null;
-  balanceSearch        = '';
-  warehouseMovementFilter = { search: '', type: 'all', status: 'all' };
-  editingWarehouseId    = null;
-  editingSupplierId     = null;
+  cashSalesFilter = '';
+  invoiceFilter = { text: '', status: '' };
+  balanceSearch = '';
+
+  warehouseMovementFilter = {
+    search: '',
+    type: 'all',
+    status: 'all'
+  };
+
+  editingWarehouseId = null;
+  editingSupplierId = null;
   warehouseTransferItems = [];
-  topCustomersSortMode  = 'spend';
-  reportsInvoicesCache  = [];
-  reportsSalesCache     = [];
+
+  topCustomersSortMode = 'spend';
+  reportsInvoicesCache = [];
+  reportsSalesCache = [];
   catalogLinkCandidates = [];
   catalogLinkRemainingCount = 0;
+
+  branches = [];
+  LOCATIONS = [];
 }
 
-function getUsers()        { return LS.get('lumoda_users') || []; }
-function getInvoices()     { return (LS.get('lumoda_invoices') || []).filter(i => !i.deleted && !i.isCashSale); }
-function getAllInvoices()   { return LS.get('lumoda_invoices') || []; }
-function getCashSales()     { return (LS.get('lumoda_invoices') || []).filter(i => !i.deleted && i.isCashSale); }
-function getCustomers()    { return LS.get('lumoda_customers') || []; }
-function getProducts()     { return normalizeProducts(LS.get('lumoda_products') || []); }
-function getStockHistory() { return LS.get('lumoda_stockhistory') || []; }
-function getSessions()     { return SS.get('lumoda_sessions') || LS.get('lumoda_sessions') || []; }
+// ============================================================
+// CACHED DATA ACCESS
+// ============================================================
+
+function getInvoices() {
+  return (LS.get('invoices') || []).filter(invoice =>
+    !invoice.deleted && !invoice.isCashSale
+  );
+}
+
+function getAllInvoices() {
+  return LS.get('invoices') || [];
+}
+
+function getCashSales() {
+  return (LS.get('invoices') || []).filter(invoice =>
+    !invoice.deleted && (
+      invoice.isCashSale ||
+      !invoice.customer_id
+    )
+  );
+}
+
+function getCustomers() {
+  return LS.get('customers') || [];
+}
+
+function getProducts() {
+  return normalizeProducts(LS.get('products') || []);
+}
+
+function getStockHistory() {
+  return LS.get('stockhistory') || [];
+}
+
+// ============================================================
+// BRANCHES
+// ============================================================
+
+// Branches are dynamic database records.
+// A branch represents a business location/warehouse.
+function normalizeBranch(branch) {
+  return {
+    id: branch.id,
+    branchName: branch.branch_name || branch.branchName || '',
+    branchCode: branch.branch_code || branch.branchCode || '',
+    address: branch.address || '',
+    phone: branch.phone || '',
+    isActive:
+      branch.is_active !== undefined
+        ? branch.is_active
+        : branch.isActive !== false
+  };
+}
+
+function setBranches(data) {
+  branches = (Array.isArray(data) ? data : [])
+    .map(normalizeBranch)
+    .filter(branch => branch.id && branch.isActive);
+
+  LOCATIONS = branches.map(branch => branch.branchName);
+
+  renderLocationSelects();
+  return branches;
+}
+
+function getBranches() {
+  return branches;
+}
+
+function getBranchById(branchId) {
+  return branches.find(branch => branch.id === branchId) || null;
+}
+
+function getBranchName(branchId) {
+  if (branchId === 'All') return 'All Branches';
+
+  return getBranchById(branchId)?.branchName || 'Unknown Branch';
+}
+
+// Fetch branches through the existing Supabase wrapper.
+// The wrapper's branch-reading method will be standardized when
+// we adapt supabase-client.js and the other modules.
+async function loadBranches() {
+  const api = getSupabaseAPI();
+
+  if (!api || !isSupabaseConfigured()) {
+    console.warn('MRA Supabase is not configured.');
+    setBranches([]);
+    return [];
+  }
+
+  const loader =
+    api.getBranches ||
+    api.fetchBranches ||
+    api.listBranches;
+
+  if (typeof loader !== 'function') {
+    console.warn(
+      'Branch loading is not available in the current Supabase client. ' +
+      'We will add the read method when adapting supabase-client.js.'
+    );
+    setBranches([]);
+    return [];
+  }
+
+  try {
+    const result = await loader.call(api);
+
+    if (result?.error) throw result.error;
+
+    const rows = Array.isArray(result)
+      ? result
+      : Array.isArray(result?.data)
+        ? result.data
+        : [];
+
+    return setBranches(rows);
+  } catch (error) {
+    console.error('Could not load MRA branches:', error);
+    toast('Could not load branches.', 'error');
+    return [];
+  }
+}
 
 // ============================================================
 // TOAST
 // ============================================================
+
 let toastTimer;
-function toast(msg, type='') {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'toast show' + (type ? ' '+type : '');
+
+function toast(message, type = '') {
+  const element = document.getElementById('toast');
+  if (!element) return;
+
+  element.textContent = message;
+  element.className = 'toast show' + (type ? ' ' + type : '');
+
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.className = 'toast'; }, 3200);
+
+  toastTimer = setTimeout(() => {
+    element.className = 'toast';
+  }, 3200);
 }
 
 // ============================================================
 // AUDIT
 // ============================================================
+
 function addAudit(action, detail, options = {}) {
-  // Always write to localStorage immediately for instant feedback
-  const log = LS.get('lumoda_audit') || [];
+  const log = LS.get('audit') || [];
+
   log.unshift({
-    id: 'au_'+Date.now(),
+    id: 'audit_' + Date.now(),
     action,
     detail,
-    by: currentUser ? currentUser.username : 'system',
-    byName: currentUser ? currentUser.fullName : 'system',
+    by: currentUser?.id || 'system',
+    byName: currentUser?.fullName || 'system',
     createdAt: Date.now(),
     localOnly: options.localOnly === true
   });
-  if (log.length > 1000) log.length = 1000;
-  LS.set('lumoda_audit', log);
 
-  // FIX BUG 3: Write to Supabase audit_logs table directly (not just RPC)
-  if (options.sync !== false && window.LumodaSupabase && window.LumodaSupabase.isConfigured() && currentUser) {
-    void window.LumodaSupabase.logAudit(action, detail).catch(err => {
-      console.warn('Server audit write failed:', err);
+  if (log.length > 1000) log.length = 1000;
+
+  LS.set('audit', log);
+
+  const api = getSupabaseAPI();
+
+  if (
+    options.sync !== false &&
+    isSupabaseConfigured() &&
+    currentUser &&
+    typeof api.logAudit === 'function'
+  ) {
+    void api.logAudit(action, detail).catch(error => {
+      console.warn('MRA audit write failed:', error);
     });
   }
 }
 
+// ============================================================
 // NAVIGATION
 // ============================================================
-function navigate(page, el) {
-  if (!isAdmin() && ['reports','audit','users','approvals','warehouses'].includes(page)) { toast('Access denied', 'error'); return; }
-  if (currentUser && currentUser.role === 'warehouse_manager' && page !== 'warehouse' && page !== 'settings') { toast('Access denied', 'error'); return; }
-  // Warehouse is only for admins and warehouse managers — nav hides it for everyone
-  // else, but that alone doesn't stop navigate('warehouse') being called directly.
-  if (page === 'warehouse' && !isAdmin() && (!currentUser || currentUser.role !== 'warehouse_manager')) { toast('Access denied', 'error'); return; }
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  const pageEl = document.getElementById('page-' + page);
-  if (!pageEl) return;
-  pageEl.classList.add('active');
-  if (el) el.classList.add('active');
-  else document.querySelector('.nav-item[data-page="' + page + '"]')?.classList.add('active');
-  const titles = { dashboard:'Dashboard', cashsales:'Cash Sales', invoices:'Invoices', customers:'Customers', products:'Products', warehouse:'Warehouse', warehouses:'Warehouse Locations', stockhistory:'Stock History', reports:'Reports', audit:'Audit Log', users:'User Management', approvals:'Pending Approvals', settings:'Settings' };
-  document.getElementById('page-title').textContent = titles[page] || page;
+
+const MRA_PAGES = {
+  dashboard: 'Dashboard',
+  cashsales: 'Cash Sales',
+  invoices: 'Invoices',
+  customers: 'Customers',
+  products: 'Products',
+  stockhistory: 'Stock History',
+  reports: 'Reports',
+  audit: 'Audit Log',
+  users: 'User Management',
+  settings: 'Settings'
+};
+
+function navigate(page, element) {
+  if (!MRA_PAGES[page]) {
+    toast('This page is not available in MRA Systems.', 'error');
+    return;
+  }
+
+  const adminOnlyPages = [
+    'reports',
+    'audit',
+    'users',
+    'settings'
+  ];
+
+  if (adminOnlyPages.includes(page) && !isAdmin()) {
+    toast('Access denied.', 'error');
+    return;
+  }
+
+  document.querySelectorAll('.page').forEach(pageElement => {
+    pageElement.classList.remove('active');
+  });
+
+  document.querySelectorAll('.nav-item').forEach(navElement => {
+    navElement.classList.remove('active');
+  });
+
+  const pageElement = document.getElementById('page-' + page);
+
+  if (!pageElement) {
+    console.warn('Page element not found:', page);
+    return;
+  }
+
+  pageElement.classList.add('active');
+
+  if (element) {
+    element.classList.add('active');
+  } else {
+    document
+      .querySelector('.nav-item[data-page="' + page + '"]')
+      ?.classList.add('active');
+  }
+
+  const title = document.getElementById('page-title');
+
+  if (title) title.textContent = MRA_PAGES[page];
+
   renderPage(page);
   closeSidebar();
 }
 
 function renderPage(page) {
-  ({
+  const renderers = {
     dashboard: renderDashboard,
     cashsales: renderCashSales,
     invoices: renderInvoices,
     customers: renderCustomers,
     products: renderProducts,
-    warehouse: renderWarehouse,
-    warehouses: renderWarehousesPage,
     stockhistory: renderStockHistory,
     reports: renderReports,
     audit: renderAuditLog,
     users: renderUsers,
-    approvals: renderApprovals,
     settings: renderSettings
-  })[page]?.();
+  };
+
+  if (typeof renderers[page] === 'function') {
+    renderers[page]();
+  }
 }
 
-function switchLocFilter(loc, el) {
+// ============================================================
+// BRANCH FILTER
+// ============================================================
+
+function switchLocFilter(branchId, element) {
   if (!isAdmin()) return;
-  document.querySelectorAll('.loc-tab').forEach(t => t.classList.remove('active'));
-  el.classList.add('active'); currentLocation = loc; refreshAll();
-}
 
-// Keeps the plain location <select>s and the loc-filter tabs in sync with
-// LOCATIONS. The HTML ships with matching static <option>s as a sane
-// fallback, this just makes them derive from one array going forward.
-function renderLocationSelects() {
-  const opts = LOCATIONS.map(l => '<option value="'+escAttr(l)+'">'+escapeHtml(l)+'</option>').join('');
-  ['inv-location','cust-location','stock-location','new-user-location'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const prev = el.value;
-    el.innerHTML = opts;
-    if (LOCATIONS.includes(prev)) el.value = prev;
+  document.querySelectorAll('.loc-tab').forEach(tab => {
+    tab.classList.remove('active');
   });
 
-  const filterEl = document.getElementById('loc-filter');
-  if (!filterEl) return;
-  const activeLoc = filterEl.querySelector('.loc-tab.active')?.dataset.loc || 'All';
-  filterEl.innerHTML = '<div class="loc-tab" data-loc="All" onclick="switchLocFilter(\'All\',this)">All</div>' +
-    LOCATIONS.map(l => '<div class="loc-tab" data-loc="'+escAttr(l)+'" onclick="switchLocFilter(\''+l+'\',this)">'+escapeHtml(l)+'</div>').join('');
-  const tabs  = Array.from(filterEl.querySelectorAll('.loc-tab'));
-  const match = tabs.find(t => t.dataset.loc === activeLoc) || tabs[0];
-  if (match) match.classList.add('active');
+  if (element) element.classList.add('active');
+
+  currentLocation = branchId;
+  refreshAll();
+}
+
+function renderLocationSelects() {
+  const selectIds = [
+    'inv-location',
+    'cust-location',
+    'stock-location',
+    'new-user-location'
+  ];
+
+  selectIds.forEach(id => {
+    const select = document.getElementById(id);
+    if (!select) return;
+
+    const previousValue = select.value;
+
+    select.innerHTML = branches.map(branch =>
+      '<option value="' + escAttr(branch.id) + '">' +
+        escapeHtml(branch.branchName) +
+      '</option>'
+    ).join('');
+
+    if (branches.some(branch => branch.id === previousValue)) {
+      select.value = previousValue;
+    }
+  });
+
+  const filter = document.getElementById('loc-filter');
+  if (!filter) return;
+
+  const previousBranch = filter.querySelector('.loc-tab.active')
+    ?.dataset.branchId || currentLocation;
+
+  let html = '';
+
+  if (isAdmin()) {
+    html +=
+      '<div class="loc-tab" data-branch-id="All" ' +
+      'onclick="switchLocFilter(\'All\',this)">' +
+      'All Branches</div>';
+  }
+
+  html += branches.map(branch =>
+    '<div class="loc-tab" data-branch-id="' +
+      escAttr(branch.id) +
+      '" onclick="switchLocFilter(\'' +
+      escAttr(branch.id) +
+      '\',this)">' +
+      escapeHtml(branch.branchName) +
+    '</div>'
+  ).join('');
+
+  filter.innerHTML = html;
+
+  const activeTab = Array.from(
+    filter.querySelectorAll('.loc-tab')
+  ).find(tab => tab.dataset.branchId === previousBranch);
+
+  if (activeTab) {
+    activeTab.classList.add('active');
+  } else {
+    const firstTab = filter.querySelector('.loc-tab');
+    if (firstTab) firstTab.classList.add('active');
+  }
 }
 
 function refreshAll() {
-  const ap = document.querySelector('.page.active');
-  if (ap) renderPage(ap.id.replace('page-', ''));
+  const activePage = document.querySelector('.page.active');
+
+  if (activePage) {
+    renderPage(activePage.id.replace('page-', ''));
+  }
 }
 
 // ============================================================
 // LIGHT / DARK THEME
-// Personal, per-device preference (not synced to an account) — stored
-// locally so it applies instantly, including on the login screen before
-// anyone's signed in. 'light'/'dark' means the user picked explicitly;
-// unset means "follow the device's system setting" (handled in CSS via
-// prefers-color-scheme). Declared before Business Settings below because
-// applyBrandColor() needs isDarkActive() to already exist.
 // ============================================================
-function getThemePreference() { return LS.get('lumoda_theme') || null; }
+
+function getThemePreference() {
+  // Keep fresh browser origins visually consistent. Users can still choose
+  // light or dark mode and that explicit preference is persisted per origin.
+  return LS.get('theme') || 'light';
+}
+
 function isDarkActive() {
   const explicit = document.documentElement.getAttribute('data-theme');
+
   if (explicit) return explicit === 'dark';
-  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+
+  return !!(
+    window.matchMedia &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+  );
 }
+
 function applyTheme(theme) {
-  if (theme === 'dark' || theme === 'light') document.documentElement.setAttribute('data-theme', theme);
-  else document.documentElement.removeAttribute('data-theme');
+  if (theme === 'dark' || theme === 'light') {
+    document.documentElement.setAttribute('data-theme', theme);
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+
   updateThemeToggleIcons();
-  // The brand colour needs to relighten/redarken whenever the theme
-  // changes, not just at page load — see applyBrandColor() below.
   applyBrandColor(getBrandColor());
 }
+
 function updateThemeToggleIcons() {
   const dark = isDarkActive();
-  document.querySelectorAll('.theme-toggle-icon').forEach(el => { el.textContent = dark ? '☀️' : '🌙'; });
-  document.querySelectorAll('.theme-toggle-btn').forEach(el => { el.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode'); });
+
+  document.querySelectorAll('.theme-toggle-icon').forEach(element => {
+    element.textContent = dark ? '☀️' : '🌙';
+  });
+
+  document.querySelectorAll('.theme-toggle-btn').forEach(element => {
+    element.setAttribute(
+      'aria-label',
+      dark ? 'Switch to light mode' : 'Switch to dark mode'
+    );
+  });
 }
+
 function toggleTheme() {
   const next = isDarkActive() ? 'light' : 'dark';
-  LS.set('lumoda_theme', next);
+
+  LS.set('theme', next);
   applyTheme(next);
 }
 
 // ============================================================
-// BUSINESS SETTINGS (cached at login by syncSupabaseCache — see auth.js)
+// BUSINESS SETTINGS
 // ============================================================
-function getBusinessSettings()      { return LS.get('lumoda_business_settings') || null; }
-function getCurrencySymbol()        { return getBusinessSettings()?.currency_symbol || 'GH₵'; }
-function getDefaultReorderLevel()   { return Number(getBusinessSettings()?.default_reorder_level) || 10; }
-function getBrandColor()            { return getBusinessSettings()?.brand_color || '#5C2D0A'; }
-function lightenHexForDark(hex) {
-  const [r, g, b] = hex.slice(1).match(/.{2}/g).map(x => parseInt(x, 16));
-  const mix = v => Math.round(v + (255 - v) * 0.55);
-  return '#' + [mix(r), mix(g), mix(b)].map(v => v.toString(16).padStart(2, '0')).join('');
+
+function getBusinessSettings() {
+  return LS.get('business_settings') || null;
 }
-// --brand-brown stays the raw colour, always — it's used as a BACKGROUND
-// (sidebar, buttons, active tab, avatar) that white text sits on top of,
-// so it needs to stay dark/saturated in both themes for that to work.
-// --accent is a second, separate token for the opposite case: brand
-// colour used as TEXT or a border sitting ON a card/surface (a heading,
-// an invoice total). That one needs to lighten in dark mode, or dark
-// brand-coloured text on a now-dark card becomes unreadable.
+
+function cacheBusinessSettings(settings) {
+  const cached = getBusinessSettings() || {};
+  const merged = { ...cached, ...(settings || {}) };
+
+  if (!merged.brand_color && cached.brand_color) {
+    merged.brand_color = cached.brand_color;
+  }
+
+  LS.set('business_settings', merged);
+  return merged;
+}
+
+function getCurrencyCode() {
+  return (
+    getBusinessSettings()?.currency_code ||
+    'GHS'
+  );
+}
+
+function getCurrencySymbol() {
+  const code = getCurrencyCode();
+
+  const symbols = {
+    GHS: 'GH₵',
+    NGN: '₦',
+    USD: '$',
+    GBP: '£',
+    EUR: '€'
+  };
+
+  return symbols[code] || code;
+}
+
+function getDefaultReorderLevel() {
+  return 10;
+}
+
+function getBrandColor() {
+  const savedColor = getBusinessSettings()?.brand_color;
+  return /^#[0-9a-fA-F]{6}$/.test(savedColor || '')
+    ? savedColor
+    : '#5C2D0A';
+}
+
+function lightenHexForDark(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex || '')) return '#93C5FD';
+
+  const values = hex.slice(1).match(/.{2}/g)
+    .map(value => parseInt(value, 16));
+
+  const mix = value =>
+    Math.round(value + (255 - value) * 0.55);
+
+  return '#' + values
+    .map(value => mix(value).toString(16).padStart(2, '0'))
+    .join('');
+}
+
 function applyBrandColor(hex) {
   if (!/^#[0-9a-fA-F]{6}$/.test(hex || '')) return;
+
   document.documentElement.style.setProperty('--brand-brown', hex);
-  document.documentElement.style.setProperty('--accent', isDarkActive() ? lightenHexForDark(hex) : hex);
+
+  document.documentElement.style.setProperty(
+    '--accent',
+    isDarkActive() ? lightenHexForDark(hex) : hex
+  );
 }
-function getLogoUrl()               { return getBusinessSettings()?.logo_url || null; }
-// Swaps the default diamond mark for an uploaded logo image, or restores
-// the default if none is set (or it was removed). Same pair of spots as
-// applyBrandColor: the login screen and the in-app sidebar.
+
+function getLogoUrl() {
+  return '../MRA.png?v=2';
+}
+
 function applyLogo(url) {
-  [['auth-logo-svg', 'auth-logo-img'], ['sidebar-logo-svg', 'sidebar-logo-img']].forEach(([svgId, imgId]) => {
+  const logoUrl = url || getLogoUrl();
+
+  [
+    ['auth-logo-svg', 'auth-logo-img'],
+    ['sidebar-logo-svg', 'sidebar-logo-img']
+  ].forEach(([svgId, imageId]) => {
     const svg = document.getElementById(svgId);
-    const img = document.getElementById(imgId);
-    if (!svg || !img) return;
-    if (url) { img.src = url; img.style.display = ''; svg.style.display = 'none'; }
-    else { img.removeAttribute('src'); img.style.display = 'none'; svg.style.display = ''; }
+    const image = document.getElementById(imageId);
+
+    if (!svg || !image) return;
+
+    if (logoUrl) {
+      image.src = logoUrl;
+      image.style.width = imageId === 'auth-logo-img' ? '280px' : '112px';
+      image.style.height = 'auto';
+      image.style.maxWidth = '100%';
+      image.style.display = '';
+      svg.style.display = 'none';
+    } else {
+      image.removeAttribute('src');
+      image.style.display = 'none';
+      svg.style.display = '';
+    }
   });
 }
-const DEFAULT_BUSINESS_NAME = 'LUMODA ENTERPRISE';
-function getBusinessName()          { return getBusinessSettings()?.business_name || DEFAULT_BUSINESS_NAME; }
-// Defaults to "complete" on a cold/empty cache so the wizard never flashes
-// before the first login sync has populated business settings.
-function isOnboardingComplete()     { return getBusinessSettings()?.onboarding_completed !== false; }
-// Pushes the business name to every place it's hardcoded as static markup:
-// the browser tab title, the login screen heading, and the sidebar wordmark
-// (which is styled as two stacked lines for the default "LUMODA" /
-// "ENTERPRISE" — a custom name doesn't split the same way, so it just goes
-// on the first line with the second line cleared).
+
+const DEFAULT_BUSINESS_NAME = 'MRA SYSTEMS';
+
+function getBusinessName() {
+  return (
+    getBusinessSettings()?.business_name ||
+    DEFAULT_BUSINESS_NAME
+  );
+}
+
+function isOnboardingComplete() {
+  // MRA admin profile and business profile are provisioned separately.
+  return true;
+}
+
 function applyBusinessName(name) {
   const businessName = name || DEFAULT_BUSINESS_NAME;
+
   document.title = businessName;
-  const authEl = document.getElementById('auth-business-name');
-  if (authEl) authEl.textContent = businessName;
+
+  const authElement = document.getElementById('auth-business-name');
+  if (authElement) authElement.textContent = businessName;
+
   const line1 = document.getElementById('sidebar-business-name-1');
   const line2 = document.getElementById('sidebar-business-name-2');
+
   if (line1 && line2) {
-    if (businessName === DEFAULT_BUSINESS_NAME) { line1.textContent = 'LUMODA'; line2.textContent = 'ENTERPRISE'; }
-    else { line1.textContent = businessName; line2.textContent = ''; }
+    line1.textContent = businessName;
+    line2.textContent = '';
   }
 }
-// Apply whatever was cached from the last login immediately, so a
-// returning admin doesn't see a flash of the default colour/logo/name/theme
-// before the next Supabase sync completes. Theme must apply first, since
-// applyBrandColor() checks isDarkActive().
+
+function applyBusinessSettings() {
+  const settings = getBusinessSettings();
+
+  applyBusinessName(settings?.business_name);
+  applyLogo(settings?.logo_url);
+}
+
+// Apply local preferences immediately.
 applyTheme(getThemePreference());
 applyLogo(getLogoUrl());
 applyBusinessName(getBusinessName());
 
 // ============================================================
-// FORMAT
+// FORMAT HELPERS
 // ============================================================
-function fmtGHS(n)    { return getCurrencySymbol() + ' ' + Number(n).toLocaleString('en', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
-function fmtDate(ts)  { return new Date(ts).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }); }
-function fmtDateTime(ts) { return new Date(ts).toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }); }
-function fmtAgo(ts)   { const d = Date.now()-ts, m = Math.floor(d/60000); if (m<1) return 'just now'; if (m<60) return m+'m ago'; const h=Math.floor(m/60); if(h<24) return h+'h ago'; return fmtDate(ts); }
+
+function fmtGHS(amount) {
+  return (
+    getCurrencySymbol() +
+    ' ' +
+    Number(amount || 0).toLocaleString('en-GH', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    })
+  );
+}
+
+function fmtDate(value) {
+  const timestamp = asTimestamp(value);
+
+  if (!timestamp) return '—';
+
+  return new Date(timestamp).toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+function fmtDateTime(value) {
+  const timestamp = asTimestamp(value);
+
+  if (!timestamp) return '—';
+
+  return new Date(timestamp).toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function fmtAgo(value) {
+  const timestamp = asTimestamp(value);
+  if (!timestamp) return '—';
+
+  const difference = Date.now() - timestamp;
+  const minutes = Math.floor(difference / 60000);
+
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return minutes + 'm ago';
+
+  const hours = Math.floor(minutes / 60);
+
+  if (hours < 24) return hours + 'h ago';
+
+  return fmtDate(timestamp);
+}
+
 function asTimestamp(value) {
   if (value instanceof Date) return value.getTime();
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
   if (typeof value === 'string') {
     const numeric = Number(value);
-    if (value.trim() !== '' && Number.isFinite(numeric)) return numeric;
+
+    if (value.trim() !== '' && Number.isFinite(numeric)) {
+      return numeric;
+    }
+
     const parsed = Date.parse(value);
     return Number.isNaN(parsed) ? 0 : parsed;
   }
+
   return 0;
 }
+
 function startOfLocalDay(value = new Date()) {
   const day = new Date(value);
-  day.setHours(0,0,0,0);
+  day.setHours(0, 0, 0, 0);
   return day;
 }
+
 function startOfWeek(value = new Date()) {
   const weekStart = startOfLocalDay(value);
   const mondayOffset = (weekStart.getDay() + 6) % 7;
+
   weekStart.setDate(weekStart.getDate() - mondayOffset);
+
   return weekStart;
 }
+
 function weekRange(value = new Date()) {
   const start = startOfWeek(value);
   const end = new Date(start);
+
   end.setDate(end.getDate() + 7);
+
   return { start, end };
 }
-function escapeHtml(v){
-  if (v === null || v === undefined) return '';
-  return String(v)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;')
-    .replace(/'/g,'&#39;');
-}
-function escAttr(v) { return escapeHtml(v); }
 
-function normalizeProduct(p) {
-  // FIX: Each price is fully independent — never copy one into another.
-  // Read from all possible field names (camelCase from JS, snake_case from Supabase).
-  // Only fall back to 0 if genuinely absent — never fall back to retail.
-  const retail    = Number(p.retailPrice    ?? p.retail_price    ?? p.price ?? 0);
-  const wholesale = Number(p.wholesalePrice ?? p.wholesale_price ?? 0);
-  const carton    = Number(p.cartonPrice    ?? p.carton_price    ?? 0);
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escAttr(value) {
+  return escapeHtml(value);
+}
+
+// ============================================================
+// PRODUCT NORMALIZATION
+// ============================================================
+
+// MRA uses one selling price, not retail/wholesale/carton tiers.
+// Also maps database field names to the existing frontend names.
+function normalizeProduct(product) {
+  if (!product) return {};
+
+  const sellingPrice = Number(
+    product.selling_price ??
+    product.sellingPrice ??
+    product.price ??
+    0
+  );
 
   return {
-    ...p,
-    price:          retail,
-    retailPrice:    retail,
-    wholesalePrice: wholesale,
-    cartonPrice:    carton
+    ...product,
+
+    id: product.id,
+    name: product.product_name || product.name || '',
+    product_name: product.product_name || product.name || '',
+
+    sku: product.sku || '',
+    barcode: product.barcode || '',
+
+    category:
+      product.category?.category_name ||
+      product.category_name ||
+      product.category ||
+      '',
+
+    category_id: product.category_id || null,
+
+    cost_price: Number(product.cost_price || 0),
+
+    price: sellingPrice,
+    selling_price: sellingPrice,
+    sellingPrice,
+
+    reorder: Number(
+      product.reorder_level ??
+      product.reorder ??
+      0
+    ),
+
+    reorder_level: Number(
+      product.reorder_level ??
+      product.reorder ??
+      0
+    ),
+
+    unit_name: product.unit_name || 'unit',
+
+    is_active:
+      product.is_active !== undefined
+        ? product.is_active
+        : true,
+
+    // Branch inventory should be supplied by the data-loading layer.
+    // Never invent branch quantities.
+    branchStock: product.branchStock || product.branch_stock || {}
   };
 }
-function normalizeProducts(products) { return (products || []).map(normalizeProduct); }
 
-function productPriceForType(product, priceType) {
-  // FIX: Return the exact stored price — no fallback to retail.
-  // If a price is 0, show 0 so staff know it needs to be set.
-  const p = normalizeProduct(product || {});
-  if (priceType === 'wholesale') return Number(p.wholesalePrice ?? 0);
-  if (priceType === 'carton')    return Number(p.cartonPrice    ?? 0);
-  return Number(p.retailPrice ?? p.price ?? 0);
+function normalizeProducts(products) {
+  return (products || []).map(normalizeProduct);
 }
-function priceTypeLabel(priceType) {
-  return priceType === 'wholesale' ? 'Wholesale' : priceType === 'carton' ? 'Carton' : 'Retail';
+
+function productPriceForType(product) {
+  return Number(normalizeProduct(product).selling_price || 0);
 }
-function autoLoginAllowed() { return LS.get('lumoda_allow_auto_login') === '1'; }
-function setAutoLoginAllowed(enabled) {
-  if (enabled) LS.set('lumoda_allow_auto_login', '1');
-  else LS.del('lumoda_allow_auto_login');
+
+function priceTypeLabel() {
+  return 'Selling Price';
 }
-function sumInvoiceTotal(invoices) { return invoices.reduce((sum, invoice) => sum + invoice.total, 0); }
+
+// ============================================================
+// GENERAL HELPERS
+// ============================================================
+
+function autoLoginAllowed() {
+  // Persistent local auto-login is not used.
+  return false;
+}
+
+function setAutoLoginAllowed() {
+  // Supabase manages session persistence.
+}
+
+function sumInvoiceTotal(invoices) {
+  return (invoices || []).reduce((sum, invoice) => {
+    return sum + Number(
+      invoice.total_amount ??
+      invoice.total ??
+      0
+    );
+  }, 0);
+}
+
 function weekComparisonLabel(currentTotal, previousTotal) {
-  const delta = currentTotal - previousTotal;
+  const delta = Number(currentTotal || 0) - Number(previousTotal || 0);
   const direction = delta >= 0 ? 'up' : 'down';
   const sign = delta >= 0 ? '+' : '-';
-  return '<span class="stat-delta ' + direction + '">' + sign + fmtGHS(Math.abs(delta)) + ' vs last week</span>';
+
+  return (
+    '<span class="stat-delta ' +
+    direction +
+    '">' +
+    sign +
+    fmtGHS(Math.abs(delta)) +
+    ' vs last week</span>'
+  );
 }
-function statusBadge(s) {
-  const m = { paid:'badge-success', pending:'badge-warning', partial:'badge-info', refunded:'badge-neutral', cancelled:'badge-danger' };
-  return '<span class="badge ' + (m[s]||'badge-neutral') + '">' + s + '</span>';
+
+function statusBadge(status) {
+  const classes = {
+    paid: 'badge-success',
+    pending: 'badge-warning',
+    partial: 'badge-info',
+    cancelled: 'badge-danger'
+  };
+
+  const safeStatus = String(status || 'unknown');
+
+  return (
+    '<span class="badge ' +
+    (classes[safeStatus] || 'badge-neutral') +
+    '">' +
+    escapeHtml(safeStatus) +
+    '</span>'
+  );
 }
+
 function stockBadge(stock, reorder) {
-  if (stock === 0) return '<span class="badge badge-danger">Out of Stock</span>';
-  if (stock <= reorder) return '<span class="badge badge-warning">Low Stock</span>';
+  const quantity = Number(stock || 0);
+  const reorderLevel = Number(reorder || 0);
+
+  if (quantity <= 0) {
+    return '<span class="badge badge-danger">Out of Stock</span>';
+  }
+
+  if (quantity <= reorderLevel) {
+    return '<span class="badge badge-warning">Low Stock</span>';
+  }
+
   return '<span class="badge badge-success">In Stock</span>';
 }
 
 // ============================================================
 // MODALS
 // ============================================================
-function openModal(id){document.getElementById(id).classList.add('open');}
-function closeModal(id){document.getElementById(id).classList.remove('open');}
+
+function openModal(id) {
+  document.getElementById(id)?.classList.add('open');
+}
+
+function closeModal(id) {
+  document.getElementById(id)?.classList.remove('open');
+}
 
 // ============================================================
-// PASSWORD VISIBILITY TOGGLE
+// PASSWORD VISIBILITY
 // ============================================================
-const EYE_ICON     = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/><circle cx="8" cy="8" r="2"/></svg>';
-const EYE_OFF_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/><circle cx="8" cy="8" r="2"/><line x1="1.5" y1="1.5" x2="14.5" y2="14.5"/></svg>';
-function togglePasswordVisibility(inputId, btn) {
+
+const EYE_ICON =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">' +
+  '<path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/>' +
+  '<circle cx="8" cy="8" r="2"/>' +
+  '</svg>';
+
+const EYE_OFF_ICON =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">' +
+  '<path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/>' +
+  '<circle cx="8" cy="8" r="2"/>' +
+  '<line x1="1.5" y1="1.5" x2="14.5" y2="14.5"/>' +
+  '</svg>';
+
+function togglePasswordVisibility(inputId, button) {
   const input = document.getElementById(inputId);
   if (!input) return;
+
   const showing = input.type === 'password';
+
   input.type = showing ? 'text' : 'password';
-  if (btn) {
-    btn.innerHTML = showing ? EYE_OFF_ICON : EYE_ICON;
-    btn.setAttribute('aria-label', showing ? 'Hide password' : 'Show password');
+
+  if (button) {
+    button.innerHTML = showing ? EYE_OFF_ICON : EYE_ICON;
+
+    button.setAttribute(
+      'aria-label',
+      showing ? 'Hide password' : 'Show password'
+    );
   }
 }
 
 // ============================================================
-// MOBILE
+// MOBILE SIDEBAR
 // ============================================================
-function openSidebar()  { document.getElementById('sidebar').classList.add('open'); document.getElementById('sidebar-overlay').classList.add('open'); }
-function closeSidebar() { document.getElementById('sidebar').classList.remove('open'); document.getElementById('sidebar-overlay').classList.remove('open'); }
+
+function openSidebar() {
+  document.getElementById('sidebar')?.classList.add('open');
+  document.getElementById('sidebar-overlay')?.classList.add('open');
+}
+
+function closeSidebar() {
+  document.getElementById('sidebar')?.classList.remove('open');
+  document.getElementById('sidebar-overlay')?.classList.remove('open');
+}

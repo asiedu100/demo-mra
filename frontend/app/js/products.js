@@ -1,349 +1,993 @@
 // ============================================================
-// PRODUCTS
+// MRA SYSTEMS — PRODUCTS
+// Dynamic branches, single selling price, database-backed data
 // ============================================================
-let productSearch = '';
-function renderProducts() {
-  const csvBtn   = document.getElementById('btn-import-csv');
-  const addBtn   = document.getElementById('btn-add-product');
-  const orderBtn = document.getElementById('btn-order-stock');
-  const linkBtn  = document.getElementById('btn-link-warehouse');
-  if (csvBtn)   csvBtn.style.display   = isAdmin() ? 'inline-flex' : 'none';
-  if (addBtn)   addBtn.style.display   = isAdmin() ? 'inline-flex' : 'none';
-  if (orderBtn) orderBtn.style.display = isAdmin() ? 'inline-flex' : 'none';
-  if (linkBtn)  linkBtn.style.display  = isAdmin() ? 'inline-flex' : 'none';
-  let products = getProducts();
-  const totalCount = products.length;
-  if(productSearch){const q=productSearch.toLowerCase();products=products.filter(p=>p.name.toLowerCase().includes(q)||p.category.toLowerCase().includes(q)||p.sku.toLowerCase().includes(q));}
-  const countEl = document.getElementById('products-count');
-  if (countEl) countEl.textContent = productSearch ? products.length+' of '+totalCount+' products' : totalCount+' product'+(totalCount!==1?'s':'');
-  const effLoc=isAdmin()?currentLocation:currentUser.location;
-  document.getElementById('products-body').innerHTML = products.map(p=>{
-    const sA=p.stockAlabar,sM=p.stockMorocco,comb=effLoc==='Morocco'?sM:effLoc==='Alabar'?sA:Math.min(sA,sM);
-    const adjBtn=isAdmin()?'<button class="btn btn-secondary btn-sm" onclick="openStockAdjust(\''+p.id+'\')">Adjust</button>':'';
-    const editBtn=isAdmin()?'<button class="btn btn-secondary btn-sm" onclick="editProduct(\''+p.id+'\')">Edit</button>':'';
-    const priceHtml = '<div style="font-weight:600;font-size:13px;color:var(--gray-800);margin-bottom:3px">'+fmtGHS(p.retailPrice||p.price)+'</div><div style="display:flex;gap:10px;font-size:10.5px;font-family:var(--font-mono);color:var(--gray-400);white-space:nowrap"><span title="Wholesale price">W '+fmtGHS(p.wholesalePrice)+'</span><span title="Carton price">C '+fmtGHS(p.cartonPrice)+'</span></div>';
-    // Same red/amber accent language as the warehouse stock table, so a
-    // low/out-of-stock product reads the same way across both areas.
-    const isOut = comb === 0, isLow = comb <= p.reorder;
-    const rowBg = isOut ? 'background:#fef2f2' : isLow ? 'background:#fefce8' : '';
-    const stripeClr = isOut ? '#dc2626' : isLow ? '#f59e0b' : 'transparent';
-    return '<tr style="'+rowBg+'"><td style="font-weight:500;box-shadow:inset 3px 0 0 '+stripeClr+'">'+escapeHtml(p.name)+'</td><td class="mono">'+escapeHtml(p.sku)+'</td><td style="color:var(--gray-400)">'+escapeHtml(p.category)+'</td><td>'+priceHtml+'</td><td class="mono" style="text-align:center;color:'+(sA<=p.reorder?'#dc2626':'inherit')+'">'+sA+'</td><td class="mono" style="text-align:center;color:'+(sM<=p.reorder?'#dc2626':'inherit')+'">'+sM+'</td><td>'+stockBadge(comb,p.reorder)+'</td><td class="mono" style="color:var(--gray-400)">'+p.reorder+'</td><td style="display:flex;gap:6px">'+adjBtn+editBtn+'</td></tr>';
-  }).join('');
+
+let adjustingProductId = null;
+let csvRows = [];
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function productValue(product, ...keys) {
+  for (const key of keys) {
+    if (product?.[key] !== undefined && product[key] !== null) {
+      return product[key];
+    }
+  }
+  return '';
 }
-function filterProducts(val){productSearch=val;renderProducts();}
-function openProductModal(){if(!requireAdmin('add products'))return;editingProductId=null;document.getElementById('prod-modal-title').textContent='New Product';['prod-name','prod-sku','prod-category','prod-price','prod-wholesale-price','prod-carton-price','prod-stock-alabar','prod-stock-morocco','prod-reorder'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});document.getElementById('prod-reorder').value=getDefaultReorderLevel();openModal('product-modal');}
-function editProduct(id){if(!requireAdmin('edit products'))return;const prod=getProducts().find(p=>p.id===id);if(!prod)return;editingProductId=id;document.getElementById('prod-modal-title').textContent='Edit Product';document.getElementById('prod-name').value=prod.name;document.getElementById('prod-sku').value=prod.sku;document.getElementById('prod-category').value=prod.category;document.getElementById('prod-price').value=prod.price;document.getElementById('prod-wholesale-price').value=prod.wholesalePrice;document.getElementById('prod-carton-price').value=prod.cartonPrice;document.getElementById('prod-stock-alabar').value=prod.stockAlabar;document.getElementById('prod-stock-morocco').value=prod.stockMorocco;document.getElementById('prod-reorder').value=prod.reorder;openModal('product-modal');}
 
-async function saveProduct(){
-  if(!requireAdmin('save products'))return;
-  const name=document.getElementById('prod-name').value.trim();
-  const price=parseFloat(document.getElementById('prod-price').value);
-  if(!name||isNaN(price)){toast('Name and retail price required','error');return;}
-  if(price<0){toast('Retail price cannot be negative','error');return;}
-  const wholesalePrice=parseFloat(document.getElementById('prod-wholesale-price').value);
-  const cartonPrice=parseFloat(document.getElementById('prod-carton-price').value);
-  if((!isNaN(wholesalePrice)&&wholesalePrice<0)||(!isNaN(cartonPrice)&&cartonPrice<0)){toast('Prices cannot be negative','error');return;}
-  const products=getProducts();
-  const sA=parseInt(document.getElementById('prod-stock-alabar').value)||0;
-  const sM=parseInt(document.getElementById('prod-stock-morocco').value)||0;
-  const reorder=parseInt(document.getElementById('prod-reorder').value)||getDefaultReorderLevel();
-  if(sA<0||sM<0||reorder<0){toast('Stock and reorder level cannot be negative','error');return;}
-  const sku=document.getElementById('prod-sku').value.trim()||'SKU-'+Date.now();
-  const cat=document.getElementById('prod-category').value.trim()||'General';
-  // FIX: if wholesale/carton fields are left blank when editing,
-  // keep the existing stored value — don't overwrite with retail price
-  const existingProduct = editingProductId ? getProducts().find(p => p.id === editingProductId) : null;
-  const resolvedWholesale = isNaN(wholesalePrice)
-    ? (existingProduct ? existingProduct.wholesalePrice : price)
-    : wholesalePrice;
-  const resolvedCarton = isNaN(cartonPrice)
-    ? (existingProduct ? existingProduct.cartonPrice : resolvedWholesale)
-    : cartonPrice;
+function productName(product) {
+  return String(productValue(product, 'name', 'product_name') || '');
+}
 
-  const payload={
-    id:editingProductId,
-    name,sku,category:cat,
-    price,retailPrice:price,
-    wholesalePrice: resolvedWholesale,
-    cartonPrice:    resolvedCarton,
-    stockAlabar:sA,stockMorocco:sM,reorder
-  };
+function productSku(product) {
+  return String(productValue(product, 'sku') || '');
+}
 
-  if(window.LumodaSupabase&&window.LumodaSupabase.isConfigured()&&window.LumodaSupabase.saveProduct){
-    try{
-      const res=await window.LumodaSupabase.saveProduct(payload);
-      if(res.error)throw res.error;
-      await syncSupabaseCache();
-      // FIX #2: syncSupabaseCache already calls refreshAllLineItemDataLists
-      addAudit(editingProductId?'Product Updated':'Product Added',currentUser.fullName+' saved "'+name+'" [server]');
-      closeModal('product-modal');
-      toast('Product saved');
-      renderProducts();
-      return;
-    }catch(err){
-      toast(err.message||'Could not save product','error');
-      return;
+function productCategory(product) {
+  return String(
+    productValue(product, 'category', 'category_name') || 'General'
+  );
+}
+
+function productPrice(product) {
+  return Number(
+    productValue(product, 'price', 'selling_price') || 0
+  );
+}
+
+function productCost(product) {
+  return Number(
+    productValue(product, 'costPrice', 'cost_price') || 0
+  );
+}
+
+function productReorder(product) {
+  return Number(
+    productValue(product, 'reorder', 'reorder_level') || 0
+  );
+}
+
+function productIsActive(product) {
+  return productValue(product, 'isActive', 'is_active') !== false;
+}
+
+function getProductBranchStock(product, branchId) {
+  const stockSources = [
+    product?.branchStock,
+    product?.branch_stock,
+    product?.branchInventory,
+    product?.branch_inventory
+  ];
+
+  for (const source of stockSources) {
+    if (!source) continue;
+
+    if (Array.isArray(source)) {
+      const match = source.find(item =>
+        String(item.branch_id || item.branchId) === String(branchId)
+      );
+
+      if (match) {
+        return Number(match.quantity || 0);
+      }
+    }
+
+    if (typeof source === 'object') {
+      const value = source[branchId];
+
+      if (value !== undefined) {
+        return Number(
+          typeof value === 'object' ? value.quantity || 0 : value
+        );
+      }
     }
   }
 
-  // Local storage path
-  if(editingProductId){
-    const idx=products.findIndex(p=>p.id===editingProductId);
-    if(idx>=0){products[idx]={...products[idx],...payload};addAudit('Product Updated',currentUser.fullName+' updated "'+name+'"');}
-  }else{
-    products.push({...payload,id:'p_'+Date.now()});
-    addAudit('Product Added',currentUser.fullName+' added "'+name+'" @ '+fmtGHS(price));
+  return 0;
+}
+
+function getProductStockSummary(product) {
+  const branches = getBranches();
+
+  return branches.map(branch => ({
+    branch,
+    quantity: getProductBranchStock(product, branch.id)
+  }));
+}
+
+function getMraProductAPI() {
+  return window.MRAApi || window.MRASupabase || window.LumodaSupabase || null;
+}
+
+function isMraDatabaseReady() {
+  const api = getMraProductAPI();
+
+  return Boolean(
+    api &&
+    typeof api.isConfigured === 'function' &&
+    api.isConfigured()
+  );
+}
+
+
+// ============================================================
+// PRODUCT LIST
+// ============================================================
+
+function renderProducts() {
+  const csvBtn = document.getElementById('btn-import-csv');
+  const addBtn = document.getElementById('btn-add-product');
+  const orderBtn = document.getElementById('btn-order-stock');
+  const linkBtn = document.getElementById('btn-link-warehouse');
+
+  if (csvBtn) csvBtn.style.display = isAdmin() ? 'inline-flex' : 'none';
+  if (linkBtn) linkBtn.style.display = 'none';
+
+  if (addBtn) {
+    addBtn.style.display = isAdmin() ? 'inline-flex' : 'none';
   }
-  LS.set('lumoda_products',normalizeProducts(products));
 
-  // FIX #2: Refresh all open datalists immediately after local save
-  loadProductSuggestions(getProducts());
+  if (orderBtn) {
+    orderBtn.style.display = isAdmin() ? 'inline-flex' : 'none';
+  }
 
-  closeModal('product-modal');
-  toast('Product saved');
+  const body = document.getElementById('products-body');
+  if (!body) return;
+
+  let products = getProducts();
+  const totalCount = products.length;
+
+  if (productSearch) {
+    const q = productSearch.toLowerCase();
+
+    products = products.filter(product => {
+      return [
+        productName(product),
+        productSku(product),
+        productCategory(product)
+      ].some(value => String(value).toLowerCase().includes(q));
+    });
+  }
+
+  const countEl = document.getElementById('products-count');
+
+  if (countEl) {
+    countEl.textContent = productSearch
+      ? `${products.length} of ${totalCount} products`
+      : `${totalCount} product${totalCount !== 1 ? 's' : ''}`;
+  }
+
+  const branches = getBranches();
+
+  // Build dynamic branch columns.
+  const table = body.closest('table');
+
+  if (table) {
+    const header = table.querySelector('thead tr');
+
+    if (header) {
+      header.innerHTML = `
+        <th>Product</th>
+        <th>SKU</th>
+        <th>Category</th>
+        <th>Selling Price</th>
+        ${branches.map(branch =>
+          `<th style="text-align:center">${escapeHtml(branch.branch_name || branch.name)}</th>`
+        ).join('')}
+        <th>Stock Status</th>
+        <th>Reorder Level</th>
+        <th>Actions</th>
+      `;
+    }
+  }
+
+  if (!products.length) {
+    body.innerHTML = `
+      <tr>
+        <td colspan="${7 + branches.length}"
+            style="text-align:center;color:var(--gray-400);padding:40px">
+          ${productSearch ? 'No matching products found.' : 'No products have been added yet.'}
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  body.innerHTML = products.map(product => {
+    const name = productName(product);
+    const sku = productSku(product);
+    const category = productCategory(product);
+    const price = productPrice(product);
+    const reorder = productReorder(product);
+    const active = productIsActive(product);
+
+    const branchStocks = getProductStockSummary(product);
+    const totalStock = branchStocks.reduce(
+      (sum, item) => sum + item.quantity,
+      0
+    );
+
+    const isOut = totalStock <= 0;
+    const isLow = !isOut && totalStock <= reorder;
+
+    const rowStyle = isOut
+      ? 'background:#fef2f2'
+      : isLow
+        ? 'background:#fefce8'
+        : '';
+
+    const stripe = isOut
+      ? '#dc2626'
+      : isLow
+        ? '#f59e0b'
+        : 'transparent';
+
+    const branchCells = branchStocks.map(item => {
+      const low = item.quantity <= reorder;
+
+      return `
+        <td class="mono"
+            style="text-align:center;color:${low ? '#dc2626' : 'inherit'}">
+          ${item.quantity}
+        </td>
+      `;
+    }).join('');
+
+    const status = !active
+      ? '<span class="badge badge-neutral">Inactive</span>'
+      : isOut
+        ? '<span class="badge badge-danger">Out of stock</span>'
+        : isLow
+          ? '<span class="badge badge-warning">Low stock</span>'
+          : '<span class="badge badge-success">In stock</span>';
+
+    const editButton = isAdmin()
+      ? `<button class="btn btn-secondary btn-sm"
+                 onclick="editProduct('${escapeHtml(product.id)}')">Edit</button>`
+      : '';
+
+    return `
+      <tr style="${rowStyle}">
+        <td style="font-weight:500;box-shadow:inset 3px 0 0 ${stripe}">
+          ${escapeHtml(name)}
+          ${!active ? '<br><small style="color:var(--gray-400)">Inactive product</small>' : ''}
+        </td>
+
+        <td class="mono">${escapeHtml(sku)}</td>
+
+        <td style="color:var(--gray-400)">
+          ${escapeHtml(category)}
+        </td>
+
+        <td style="font-weight:600">
+          ${fmtGHS(price)}
+        </td>
+
+        ${branchCells}
+
+        <td>${status}</td>
+
+        <td class="mono" style="color:var(--gray-400)">
+          ${reorder}
+        </td>
+
+        <td>
+          <div style="display:flex;gap:6px">
+            ${editButton}
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function filterProducts(value) {
+  productSearch = value || '';
   renderProducts();
 }
 
-function orderStock(){if(!requireAdmin('order stock'))return;const low=getProducts().filter(p=>p.stockAlabar<=p.reorder||p.stockMorocco<=p.reorder);if(low.length===0){toast('No restocking needed');return;}const text=getBusinessName()+' — Restock Order\n\n'+low.map(p=>'• '+p.name+' ('+p.sku+')\n  Alabar: '+p.stockAlabar+' | Morocco: '+p.stockMorocco+' | Reorder at: '+p.reorder).join('\n');try{navigator.clipboard.writeText(text);toast('Restock list copied');}catch{alert(text);}}
+
+// ============================================================
+// ADD PRODUCT
+// ============================================================
+
+function openProductModal() {
+  if (!requireAdmin('add products')) return;
+
+  if (!isMraDatabaseReady()) {
+    toast('Database connection is not available.', 'error');
+    return;
+  }
+
+  editingProductId = null;
+
+  const title = document.getElementById('prod-modal-title');
+  if (title) title.textContent = 'New Product';
+
+  [
+    'prod-name',
+    'prod-sku',
+    'prod-category',
+    'prod-price',
+    'prod-cost-price',
+    'prod-reorder'
+  ].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+
+  const reorder = document.getElementById('prod-reorder');
+
+  if (reorder) {
+    reorder.value = getDefaultReorderLevel();
+  }
+
+  openModal('product-modal');
+}
+
+
+// ============================================================
+// EDIT PRODUCT
+// ============================================================
+
+function editProduct(id) {
+  if (!requireAdmin('edit products')) return;
+
+  const product = getProducts().find(
+    item => String(item.id) === String(id)
+  );
+
+  if (!product) {
+    toast('Product not found.', 'error');
+    return;
+  }
+
+  editingProductId = id;
+
+  const title = document.getElementById('prod-modal-title');
+  if (title) title.textContent = 'Edit Product';
+
+  const fields = {
+    'prod-name': productName(product),
+    'prod-sku': productSku(product),
+    'prod-category': productCategory(product),
+    'prod-price': productPrice(product),
+    'prod-cost-price': productCost(product),
+    'prod-reorder': productReorder(product)
+  };
+
+  Object.entries(fields).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+
+  openModal('product-modal');
+}
+
+
+// ============================================================
+// SAVE PRODUCT
+// ============================================================
+
+async function saveProduct() {
+  if (!requireAdmin('save products')) return;
+
+  if (!isMraDatabaseReady()) {
+    toast('Database connection is not available.', 'error');
+    return;
+  }
+
+  const name = document.getElementById('prod-name')?.value.trim();
+  const skuInput = document.getElementById('prod-sku')?.value.trim();
+  const category =
+    document.getElementById('prod-category')?.value.trim() || 'General';
+
+  const price = Number(
+    document.getElementById('prod-price')?.value
+  );
+
+  const costInput = document.getElementById('prod-cost-price')?.value;
+  const costPrice = costInput === '' || costInput === undefined
+    ? 0
+    : Number(costInput);
+
+  const reorderInput = document.getElementById('prod-reorder')?.value;
+  const reorder = reorderInput === ''
+    ? getDefaultReorderLevel()
+    : Number(reorderInput);
+
+  if (!name) {
+    toast('Product name is required.', 'error');
+    return;
+  }
+
+  if (!Number.isFinite(price) || price < 0) {
+    toast('Enter a valid selling price.', 'error');
+    return;
+  }
+
+  if (!Number.isFinite(costPrice) || costPrice < 0) {
+    toast('Enter a valid cost price.', 'error');
+    return;
+  }
+
+  if (!Number.isInteger(reorder) || reorder < 0) {
+    toast('Reorder level must be a non-negative whole number.', 'error');
+    return;
+  }
+
+  const sku = skuInput || `SKU-${Date.now()}`;
+
+  const existing = editingProductId
+    ? getProducts().find(p => String(p.id) === String(editingProductId))
+    : null;
+
+  // Keep the existing product's active state when editing.
+  const payload = {
+    id: editingProductId || undefined,
+
+    // The compatibility API accepts these names and maps them
+    // to the MRA products table.
+    name,
+    product_name: name,
+
+    sku,
+
+    category,
+    category_name: category,
+
+    price,
+    selling_price: price,
+
+    costPrice,
+    cost_price: costPrice,
+
+    reorder,
+    reorder_level: reorder,
+
+    is_active: existing
+      ? productIsActive(existing)
+      : true
+  };
+
+  const saveButton = document.querySelector(
+    '#product-modal button[onclick="saveProduct()"]'
+  );
+
+  if (saveButton) {
+    saveButton.disabled = true;
+    saveButton.textContent = 'Saving...';
+  }
+
+  try {
+    const api = getMraProductAPI();
+
+    const result = await api.saveProduct(payload);
+
+    if (result?.error) {
+      throw result.error;
+    }
+
+    if (result?.success === false) {
+      throw new Error(result.error || 'Could not save product.');
+    }
+
+    // Refresh server-backed product and inventory data.
+    await syncSupabaseCache();
+
+    if (typeof loadProductSuggestions === 'function') {
+      loadProductSuggestions(getProducts());
+    }
+
+    if (typeof addAudit === 'function') {
+      addAudit(
+        editingProductId ? 'Product Updated' : 'Product Added',
+        `${currentUser.fullName} saved "${name}"`
+      );
+    }
+
+    closeModal('product-modal');
+
+    toast(
+      editingProductId
+        ? 'Product updated successfully.'
+        : 'Product created successfully.'
+    );
+
+    renderProducts();
+
+  } catch (error) {
+    console.error('Save product failed:', error);
+    toast(error.message || 'Could not save product.', 'error');
+
+  } finally {
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = 'Save Product';
+    }
+  }
+}
+
+
+// ============================================================
+// RESTOCK SUMMARY
+// ============================================================
+
+function orderStock() {
+  if (!requireAdmin('view restock list')) return;
+
+  const branches = getBranches();
+  const products = getProducts();
+
+  const lowStock = [];
+
+  products.forEach(product => {
+    if (!productIsActive(product)) return;
+
+    const reorder = productReorder(product);
+
+    branches.forEach(branch => {
+      const quantity = getProductBranchStock(product, branch.id);
+
+      if (quantity <= reorder) {
+        lowStock.push({
+          product,
+          branch,
+          quantity,
+          reorder
+        });
+      }
+    });
+  });
+
+  if (!lowStock.length) {
+    toast('No restocking needed.');
+    return;
+  }
+
+  const lines = lowStock.map(item =>
+    `• ${productName(item.product)} (${productSku(item.product)})\n` +
+    `  ${item.branch.branch_name || item.branch.name}: ${item.quantity} ` +
+    `(Reorder level: ${item.reorder})`
+  );
+
+  const text = `${getBusinessName()} — Restock List\n\n${lines.join('\n\n')}`;
+
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast('Restock list copied.'))
+      .catch(() => window.prompt('Copy restock list:', text));
+  } else {
+    window.prompt('Copy restock list:', text);
+  }
+}
+
 
 // ============================================================
 // STOCK ADJUSTMENT
 // ============================================================
-let adjustingProductId=null;
-function openStockAdjust(pid){if(!requireAdmin('adjust stock'))return;adjustingProductId=pid;const prod=getProducts().find(p=>p.id===pid);if(!prod)return;document.getElementById('stock-prod-name').value=prod.name;document.getElementById('stock-qty').value='';document.getElementById('stock-note').value='';document.getElementById('stock-type').value='Purchase';openModal('stock-modal');}
-async function applyStockAdjustment(){
-  if(!requireAdmin('adjust stock'))return;
-  const loc=document.getElementById('stock-location').value;
-  const type=document.getElementById('stock-type').value;
-  const qty=parseInt(document.getElementById('stock-qty').value);
-  const note=document.getElementById('stock-note').value.trim();
-  if(isNaN(qty)||qty===0){toast('Enter a valid quantity','error');return;}
-  const products=getProducts();
-  const idx=products.findIndex(p=>p.id===adjustingProductId);
-  if(idx<0)return;
-  const prod=products[idx];
-  const isAdd=['Purchase','Return'].includes(type);
-  const absQty=Math.abs(qty);
-  const change=isAdd?absQty:-absQty;
 
-  // The actual read-check-write and stock_history insert now happen
-  // together, atomically, server-side (adjust_product_stock) — this avoids
-  // the old race where two concurrent adjustments could both read the same
-  // stale stock value and the second write would silently clobber the
-  // first. The values below are only used for the offline/not-configured
-  // fallback path.
-  if(window.LumodaSupabase&&window.LumodaSupabase.isConfigured()&&window.LumodaSupabase.adjustProductStock){
-    try{
-      const res=await window.LumodaSupabase.adjustProductStock({
-        productId:prod.id, location:loc, delta:change, type, note:note||('Manual '+type)
-      });
-      if(!res?.success){toast(res?.error||'Could not save stock adjustment','error');return;}
-      const cacheIdx=products.findIndex(p=>p.id===prod.id);
-      if(cacheIdx>=0) products[cacheIdx]={...prod,stockAlabar:res.stock_alabar,stockMorocco:res.stock_morocco};
-      LS.set('lumoda_products',normalizeProducts(products));
-      loadProductSuggestions(getProducts());
-    }catch(err){
-      toast(err.message||'Could not save stock adjustment','error');
+// MRA does not yet have a secure stock-adjustment RPC.
+// Do not update branch_inventory directly from the frontend.
+
+function openStockAdjust(productId) {
+  if (!requireAdmin('adjust stock')) return;
+
+  toast(
+    'Stock adjustments are not enabled yet. A secure database function is required.',
+    'error'
+  );
+}
+
+async function applyStockAdjustment() {
+  if (!requireAdmin('adjust stock')) return;
+
+  toast(
+    'Stock adjustments are not enabled yet.',
+    'error'
+  );
+}
+
+
+// ============================================================
+// STOCK HISTORY
+// ============================================================
+
+async function renderStockHistory() {
+  const body = document.getElementById('stockhistory-body');
+  if (!body) return;
+
+  body.innerHTML = `
+    <tr>
+      <td colspan="7"
+          style="text-align:center;color:var(--gray-400);padding:30px">
+        Loading stock history...
+      </td>
+    </tr>
+  `;
+
+  try {
+    const api = getMraProductAPI();
+
+    if (!api?.loadStockHistory) {
+      throw new Error('Stock history is not available.');
+    }
+
+    const history = await api.loadStockHistory();
+
+    const records = Array.isArray(history) ? history : [];
+
+    const filtered = filterByLoc(records);
+
+    filtered.sort((a, b) => {
+      const dateA = new Date(
+        a.created_at || a.createdAt || 0
+      ).getTime();
+
+      const dateB = new Date(
+        b.created_at || b.createdAt || 0
+      ).getTime();
+
+      return dateB - dateA;
+    });
+
+    if (!filtered.length) {
+      body.innerHTML = `
+        <tr>
+          <td colspan="7"
+              style="text-align:center;color:var(--gray-400);padding:40px">
+            No stock history yet.
+          </td>
+        </tr>
+      `;
       return;
     }
-  }else{
-    let newStockAlabar=prod.stockAlabar, newStockMorocco=prod.stockMorocco;
-    if(loc==='Alabar'){
-      if(!isAdd&&prod.stockAlabar<absQty){toast('Insufficient stock','error');return;}
-      newStockAlabar=Math.max(0,prod.stockAlabar+change);
-    }else{
-      if(!isAdd&&prod.stockMorocco<absQty){toast('Insufficient stock','error');return;}
-      newStockMorocco=Math.max(0,prod.stockMorocco+change);
-    }
-    products[idx]={...prod,stockAlabar:newStockAlabar,stockMorocco:newStockMorocco};
-    LS.set('lumoda_products',products);
-    // No server round-trip in this path, so log locally as before.
-    addStockHistory(prod.id,prod.name,loc,change,type,note||'Manual '+type);
-  }
 
-  addAudit('Stock Adjusted',currentUser.fullName+' adjusted "'+prod.name+'" '+(change>0?'+':'')+change+' at '+loc+' ('+type+')');
-  closeModal('stock-modal');
-  toast('Stock updated');
-  renderProducts();
-  renderDashboard();
+    body.innerHTML = filtered.map(record => {
+      const date = record.created_at || record.createdAt;
+      const type = record.movement_type || record.type || 'Movement';
+
+      const branchName =
+        record.branch_name ||
+        getBranchName(record.branch_id) ||
+        'Unknown branch';
+
+      const change = Number(
+        record.quantity_change ?? record.change ?? 0
+      );
+
+      const product = record.product_name ||
+        record.productName ||
+        'Product';
+
+      const note = record.reason || record.note || '—';
+
+      const user = record.created_by_name ||
+        record.byName ||
+        record.by ||
+        '—';
+
+      return `
+        <tr>
+          <td class="mono">${fmtDateTime(date)}</td>
+
+          <td>
+            <span class="badge badge-neutral">
+              ${escapeHtml(type)}
+            </span>
+          </td>
+
+          <td>${escapeHtml(product)}</td>
+
+          <td>${escapeHtml(branchName)}</td>
+
+          <td class="mono"
+              style="color:${change > 0 ? '#16a34a' : change < 0 ? '#dc2626' : 'inherit'}">
+            ${change > 0 ? '+' : ''}${change}
+          </td>
+
+          <td>${escapeHtml(note)}</td>
+
+          <td>${escapeHtml(user)}</td>
+        </tr>
+      `;
+    }).join('');
+
+  } catch (error) {
+    console.error('Load stock history failed:', error);
+
+    body.innerHTML = `
+      <tr>
+        <td colspan="7"
+            style="text-align:center;color:#dc2626;padding:30px">
+          Could not load stock history.
+        </td>
+      </tr>
+    `;
+  }
 }
-function addStockHistory(productId, productName, location, change, type, note) {
-  // Write to localStorage immediately
-  const h = getStockHistory();
-  h.unshift({
-    id: 'sh_'+Date.now(),
-    productId, productName, location, change, type, note,
-    by: currentUser.username,
-    byName: currentUser.fullName,
-    createdAt: Date.now()
+
+function filterStockHistory(value) {
+  const query = String(value || '').toLowerCase();
+
+  document.querySelectorAll('#stockhistory-body tr').forEach(row => {
+    row.style.display = row.textContent.toLowerCase().includes(query)
+      ? ''
+      : 'none';
   });
-  LS.set('lumoda_stockhistory', h);
-
-  // FIX BUG 3: Write to Supabase stock_history table
-  if (window.LumodaSupabase && window.LumodaSupabase.isConfigured() && currentUser) {
-    void window.LumodaSupabase.logStockHistory({
-      productId, productName, location, change, type, note: note || ''
-    }).catch(err => { console.warn('Server stock history write failed:', err); });
-  }
 }
-async function renderStockHistory() {
-  // FIX BUG 3: Load from Supabase first, fall back to localStorage
-  if (window.LumodaSupabase && window.LumodaSupabase.isConfigured()) {
-    try {
-      const serverHistory = await window.LumodaSupabase.loadStockHistory();
-      if (Array.isArray(serverHistory) && serverHistory.length > 0) {
-        LS.set('lumoda_stockhistory', serverHistory);
-      }
-    } catch (e) {
-      console.warn('Could not load stock history from server:', e);
-    }
-  }
 
-  let h = filterByLoc(getStockHistory());
-  h.sort((a, b) => asTimestamp(b.createdAt) - asTimestamp(a.createdAt));
-  document.getElementById('stockhistory-body').innerHTML = h.length === 0
-    ? '<tr><td colspan="7" style="text-align:center;color:var(--gray-400);padding:40px">No stock history yet</td></tr>'
-    : h.map(x =>
-        '<tr>' +
-        '<td class="mono">' + fmtDateTime(x.createdAt) + '</td>' +
-        '<td><span class="badge badge-neutral">' + escapeHtml(x.type) + '</span></td>' +
-        '<td>' + escapeHtml(x.productName) + '</td>' +
-        '<td>' + escapeHtml(x.location) + '</td>' +
-        '<td class="mono" style="color:' + (x.change > 0 ? '#16a34a' : '#dc2626') + '">' + (x.change > 0 ? '+' : '') + x.change + '</td>' +
-        '<td>' + escapeHtml(x.note || '—') + '</td>' +
-        '<td>' + escapeHtml(x.byName || x.by) + '</td>' +
-        '</tr>'
-      ).join('');
-}
-function filterStockHistory(val){const q=val.toLowerCase();document.querySelectorAll('#stockhistory-body tr').forEach(tr=>tr.style.display=tr.textContent.toLowerCase().includes(q)?'':'none');}
 
 // ============================================================
 // CSV IMPORT
 // ============================================================
-let csvRows=[];
-function openCsvModal(){if(!requireAdmin('import CSV'))return;csvRows=[];document.getElementById('csv-file-input').value='';document.getElementById('csv-preview').style.display='none';document.getElementById('csv-import-btn').style.display='none';showCsvError('');openModal('csv-modal');}
-function showCsvError(msg){const e=document.getElementById('csv-error');if(!e)return;e.textContent=msg;e.style.display=msg?'block':'none';}
-function parseCsvLine(line){const out=[];let cur='',inQ=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}else if(ch===','&&!inQ){out.push(cur.trim());cur='';}else cur+=ch;}out.push(cur.trim());return out;}
-function parseCsvFile(input){const file=input.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const text=String(reader.result||'');const lines=text.split(/\r?\n/).filter(l=>l.trim());if(lines.length<2)throw new Error('CSV must include headers and at least one product row.');const headers=parseCsvLine(lines[0]).map(h=>h.toLowerCase().replace(/\s+/g,''));const idx={name:headers.indexOf('name'),price:headers.indexOf('price'),sku:headers.indexOf('sku'),category:headers.indexOf('category'),alabar:headers.indexOf('alabarstock'),morocco:headers.indexOf('moroccostock'),reorder:headers.indexOf('reorderlevel')};if(idx.name<0||idx.price<0)throw new Error('Missing required columns: Name and Price.');const skipped=[];csvRows=lines.slice(1).map((line,i)=>{const c=parseCsvLine(line);return{name:c[idx.name]||'',price:parseFloat(c[idx.price]),sku:idx.sku>=0?c[idx.sku]:'',category:idx.category>=0?c[idx.category]:'General',stockAlabar:idx.alabar>=0?parseInt(c[idx.alabar]||'0'):0,stockMorocco:idx.morocco>=0?parseInt(c[idx.morocco]||'0'):0,reorder:idx.reorder>=0?parseInt(c[idx.reorder]||String(getDefaultReorderLevel())):getDefaultReorderLevel(),row:i+2};}).filter(r=>{if(!r.name)return false;if(isNaN(r.price)||r.price<0){skipped.push('row '+r.row+' ('+r.name+')');return false;}return true;});renderCsvPreview();showCsvError(skipped.length?('Skipped '+skipped.length+' row(s) with a missing/invalid price: '+skipped.join(', ')):'');}catch(err){showCsvError(err.message);}};reader.readAsText(file);}
-function renderCsvPreview(){document.getElementById('csv-preview').style.display='block';document.getElementById('csv-import-btn').style.display=csvRows.length?'inline-flex':'none';document.getElementById('csv-preview-title').textContent=csvRows.length+' product(s) ready to import';document.getElementById('csv-preview-body').innerHTML=csvRows.map((r,i)=>'<tr><td>'+escapeHtml(r.name)+'</td><td>'+escapeHtml(r.sku||'—')+'</td><td>'+escapeHtml(r.category||'General')+'</td><td class="mono">'+fmtGHS(r.price||0)+'</td><td class="mono">'+(r.stockAlabar||0)+'</td><td class="mono">'+(r.stockMorocco||0)+'</td><td class="mono">'+(r.reorder||getDefaultReorderLevel())+'</td><td><button class="btn btn-danger btn-sm" onclick="removeCsvRow('+i+')">Remove</button></td></tr>').join('');}
-function removeCsvRow(i){csvRows.splice(i,1);renderCsvPreview();}
-async function importCsvProducts(){if(!requireAdmin('import products'))return;if(!csvRows.length)return;if(window.LumodaSupabase&&window.LumodaSupabase.isConfigured()){try{const res=await window.LumodaSupabase.importProducts(csvRows.map(r=>({name:r.name,sku:r.sku,category:r.category||'General',price:r.price||0,stock_alabar:r.stockAlabar||0,stock_morocco:r.stockMorocco||0,reorder_level:r.reorder||getDefaultReorderLevel()})));if(res.error)throw res.error;await syncSupabaseCache();addAudit('CSV Imported',currentUser.fullName+' imported '+csvRows.length+' products [server]');closeModal('csv-modal');toast(csvRows.length+' products imported');renderProducts();return;}catch(err){showCsvError(err.message||'Could not import products to Supabase.');return;}}showCsvError('Supabase is not configured. CSV imports are disabled.');}
-function downloadCsvTemplate(){const csv='Name,Price,SKU,Category,AlabarStock,MoroccoStock,ReorderLevel\nExample Product,100,EX-001,General,10,5,3';const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='lumoda-products-template.csv';a.click();URL.revokeObjectURL(a.href);}
-function exportCSV(){const h=getStockHistory();const csv='Date,Type,Product,Location,Change,Note,By\n'+h.map(x=>[fmtDateTime(x.createdAt),x.type,x.productName,x.location,x.change,x.note,x.byName||x.by].map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='lumoda-stock-history.csv';a.click();URL.revokeObjectURL(a.href);}
 
-// ============================================================
-// LINK PRODUCTS TO WAREHOUSE CATALOG (one-time reconciliation)
-// Products and warehouse items are two separate catalogs that historically
-// never shared a code. Going forward a DB trigger keeps them in sync
-// automatically (saving a product creates/updates a matching warehouse
-// item). This screen handles the existing mismatch: it proposes pairs by
-// an exact name match and lets an admin confirm or skip each one — never
-// links anything without a human looking at it, since two different real
-// products can easily share a similar name.
-// ============================================================
-let catalogLinkCandidates = [];
-let catalogLinkRemainingCount = 0;
-
-async function openCatalogLinkModal(){
-  if(!requireAdmin('link the warehouse catalog'))return;
-  if(typeof syncWarehouseCacheFromServer === 'function') await syncWarehouseCacheFromServer();
-  buildCatalogLinkCandidates();
-  renderCatalogLinkRows();
-  openModal('catalog-link-modal');
+function openCsvModal() {
+  if (!requireAdmin('import products')) return;
+  csvRows = [];
+  showCsvError('');
+  document.getElementById('csv-preview').style.display = 'none';
+  document.getElementById('csv-import-btn').style.display = 'none';
+  const input = document.getElementById('csv-file-input');
+  if (input) input.value = '';
+  openModal('csv-modal');
 }
 
-function buildCatalogLinkCandidates(){
-  const products = getProducts().filter(p=>p.sku);
-  const whItems = (typeof getWarehouseProductsLocal === 'function' ? getWarehouseProductsLocal() : []);
-  const bySku = new Set(whItems.map(w=>String(w.code||'').toLowerCase()).filter(Boolean));
+function showCsvError(message) {
+  const element = document.getElementById('csv-error');
 
-  // A product may already have its own auto-created warehouse row (the
-  // sync trigger fires on every save) — that alone doesn't mean there's
-  // nothing to reconcile. A separate, older warehouse item can still exist
-  // under a different code with the same name, holding real stock that
-  // hasn't been merged in yet. So candidates are: any warehouse item whose
-  // name matches a product but whose code does NOT match that product's own
-  // sku — regardless of whether the product already has its own row.
-  const usedWhIds = new Set();
-  catalogLinkCandidates = [];
-  let remaining = 0;
-  products.forEach(p=>{
-    const ownSku = String(p.sku).toLowerCase();
-    const nameKey = String(p.name||'').trim().toLowerCase();
-    const orphan = whItems.find(w=>
-      !usedWhIds.has(w.id) &&
-      String(w.code||'').toLowerCase() !== ownSku &&
-      String(w.name||'').trim().toLowerCase() === nameKey
+  if (!element) return;
+
+  element.textContent = message || '';
+  element.style.display = message ? 'block' : 'none';
+}
+
+function parseCsvLine(line) {
+  const result = [];
+  let current = '';
+  let insideQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (char === '"') {
+      if (insideQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        insideQuotes = !insideQuotes;
+      }
+    } else if (char === ',' && !insideQuotes) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  result.push(current.trim());
+
+  return result;
+}
+
+function parseCsvFile() {
+  const input = document.getElementById('csv-file-input');
+  const file = input?.files?.[0];
+  if (!file) return;
+  if (!/\.csv$/i.test(file.name)) {
+    showCsvError('Please save the spreadsheet as CSV before importing.');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const lines = String(reader.result || '').split(/\r?\n/).filter(line => line.trim());
+      if (lines.length < 2) throw new Error('The file must contain a header row and at least one product.');
+      const headers = parseCsvLine(lines.shift()).map(header =>
+        header.toLowerCase().replace(/[\s_-]+/g, '')
+      );
+      const nameIndex = headers.findIndex(header =>
+        ['name', 'productname', 'product'].includes(header)
+      );
+      const priceIndex = headers.findIndex(header =>
+        ['price', 'sellingprice', 'selling'].includes(header)
+      );
+      if (nameIndex < 0 || priceIndex < 0) {
+        throw new Error('Required columns are Product Name and Selling Price.');
+      }
+      csvRows = lines.map((line, index) => {
+        const values = parseCsvLine(line);
+        const value = (...names) => {
+          const i = headers.findIndex(header => names.includes(header));
+          return i >= 0 ? String(values[i] || '').trim() : '';
+        };
+        const row = {
+          line: index + 2,
+          name: String(values[nameIndex] || '').trim(),
+          sku: value('sku', 'productcode', 'code'),
+          category: value('category', 'categoryname'),
+          costPrice: value('costprice', 'cost'),
+          sellingPrice: String(values[priceIndex] || '').trim(),
+          reorder: value('reorderlevel', 'reorder', 'reorderat'),
+          unitName: value('unit', 'unitname') || 'piece'
+        };
+        row.error = !row.name
+          ? 'Product name is required'
+          : !Number.isFinite(Number(row.sellingPrice)) || Number(row.sellingPrice) < 0
+            ? 'Selling price must be a non-negative number'
+            : '';
+        return row;
+      });
+      renderCsvPreview();
+    } catch (error) {
+      csvRows = [];
+      showCsvError(error.message);
+    }
+  };
+  reader.onerror = () => showCsvError('Could not read the selected file.');
+  reader.readAsText(file);
+}
+
+function renderCsvPreview() {
+  const preview = document.getElementById('csv-preview');
+  const body = document.getElementById('csv-preview-body');
+  const title = document.getElementById('csv-preview-title');
+  if (!preview || !body || !title) return;
+  const invalid = csvRows.filter(row => row.error);
+  title.textContent = `${csvRows.length} product${csvRows.length === 1 ? '' : 's'} ready to import${invalid.length ? ` · ${invalid.length} invalid` : ''}`;
+  body.innerHTML = csvRows.map((row, index) => `
+    <tr>
+      <td>${escapeHtml(row.name || '—')}</td>
+      <td>${escapeHtml(row.sku || '—')}</td>
+      <td>${escapeHtml(row.category || 'General')}</td>
+      <td>${escapeHtml(row.sellingPrice || '—')}</td>
+      <td colspan="3">${row.error ? `<span style="color:#b91c1c">${escapeHtml(row.error)}</span>` : `${escapeHtml(row.unitName)} · reorder ${escapeHtml(row.reorder || '0')}`}</td>
+      <td><button class="btn btn-secondary btn-sm" onclick="removeCsvRow(${index})">Remove</button></td>
+    </tr>
+  `).join('');
+  preview.style.display = '';
+  document.getElementById('csv-import-btn').style.display =
+    csvRows.length && !invalid.length ? '' : 'none';
+}
+
+function removeCsvRow(index) {
+  csvRows.splice(index, 1);
+  renderCsvPreview();
+}
+
+async function importCsvProducts() {
+  if (!requireAdmin('import products')) return;
+  if (!csvRows.length || csvRows.some(row => row.error)) return;
+  const api = getMraProductAPI();
+  if (!api?.saveProduct) {
+    showCsvError('The product database is not available.');
+    return;
+  }
+  const button = document.getElementById('csv-import-btn');
+  button.disabled = true;
+  try {
+    const imported = await api.importProducts(csvRows);
+    closeModal('csv-modal');
+    toast(`${imported.length} product${imported.length === 1 ? '' : 's'} imported successfully`);
+    if (typeof syncSupabaseCache === 'function') await syncSupabaseCache();
+    renderProducts();
+  } catch (error) {
+    showCsvError(error.message || 'Could not import products.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function downloadCsvTemplate() {
+  const csv = [
+    'Product Name,SKU,Category,Cost Price,Selling Price,Reorder Level',
+    'Example Product,EX-001,General,50,100,5'
+  ].join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'mra-products-template.csv';
+  link.click();
+
+  URL.revokeObjectURL(url);
+}
+
+
+// ============================================================
+// STOCK HISTORY EXPORT
+// ============================================================
+
+function exportCSV() {
+  const rows = [];
+
+  document.querySelectorAll('#stockhistory-body tr').forEach(row => {
+    if (row.cells.length < 7) return;
+
+    rows.push(
+      Array.from(row.cells).map(cell => cell.textContent.trim())
     );
-    if(orphan){
-      usedWhIds.add(orphan.id);
-      catalogLinkCandidates.push({ product:p, whItem:orphan });
-    } else if(!bySku.has(ownSku)){
-      remaining++;
-    }
   });
-  catalogLinkRemainingCount = remaining;
+
+  if (!rows.length) {
+    toast('No stock history to export.');
+    return;
+  }
+
+  const headers = [
+    'Date',
+    'Movement Type',
+    'Product',
+    'Branch',
+    'Quantity Change',
+    'Reason',
+    'User'
+  ];
+
+  const csv = [headers, ...rows]
+    .map(row =>
+      row.map(value =>
+        `"${String(value).replace(/"/g, '""')}"`
+      ).join(',')
+    )
+    .join('\n');
+
+  const blob = new Blob([csv], {
+    type: 'text/csv;charset=utf-8;'
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'mra-stock-history.csv';
+  link.click();
+
+  URL.revokeObjectURL(url);
 }
 
-function renderCatalogLinkRows(){
+
+// ============================================================
+// LEGACY WAREHOUSE CATALOGUE FUNCTIONS
+// ============================================================
+
+// MRA uses branches as stock locations.
+// There is no separate warehouse catalogue to reconcile.
+
+async function openCatalogLinkModal() {
+  toast('MRA does not use a separate warehouse catalogue.');
+}
+
+function buildCatalogLinkCandidates() {
+  return [];
+}
+
+function renderCatalogLinkRows() {
   const body = document.getElementById('catalog-link-rows');
-  const remainingEl = document.getElementById('catalog-link-remaining');
-  if(body){
-    body.innerHTML = catalogLinkCandidates.length ? catalogLinkCandidates.map((c,i)=>
-      '<tr>'+
-        '<td>'+escapeHtml(c.product.name)+' <span class="mono" style="color:var(--gray-400);font-size:11px">('+escapeHtml(c.product.sku)+')</span></td>'+
-        '<td>'+escapeHtml(c.whItem.name)+' <span class="mono" style="color:var(--gray-400);font-size:11px">('+escapeHtml(c.whItem.code)+')</span></td>'+
-        '<td style="white-space:nowrap">'+
-          '<button class="btn btn-primary btn-sm" onclick="confirmCatalogLink('+i+')">Confirm</button> '+
-          '<button class="btn btn-secondary btn-sm" onclick="skipCatalogLink('+i+')">Skip</button>'+
-        '</td>'+
-      '</tr>'
-    ).join('') : '<tr><td colspan="3" style="text-align:center;color:var(--gray-400);padding:20px">No proposed matches right now</td></tr>';
-  }
-  if(remainingEl){
-    remainingEl.textContent = catalogLinkRemainingCount > 0
-      ? catalogLinkRemainingCount+' product(s) have no proposed match.'
-      : 'Every product either has a warehouse match or already has a warehouse entry.';
-    if(catalogLinkRemainingCount > 0){
-      remainingEl.innerHTML += ' <button class="btn btn-primary btn-sm" onclick="backfillRemainingWarehouseEntries()">Create warehouse entries for the remaining '+catalogLinkRemainingCount+'</button>';
-    }
+
+  if (body) {
+    body.innerHTML = `
+      <tr>
+        <td colspan="3" style="text-align:center;padding:20px">
+          MRA uses branches as stock locations.
+        </td>
+      </tr>
+    `;
   }
 }
 
-function skipCatalogLink(index){
-  catalogLinkCandidates.splice(index,1);
-  renderCatalogLinkRows();
+function skipCatalogLink() {}
+
+async function confirmCatalogLink() {
+  toast('Warehouse catalogue linking is not used in MRA.');
 }
 
-async function confirmCatalogLink(index){
-  const c = catalogLinkCandidates[index];
-  if(!c)return;
-  try{
-    const res = await window.LumodaSupabase.linkCatalogItem(c.product.id, c.whItem.id);
-    if(!res?.success){toast(res?.error||'Could not link item','error');return;}
-    if(typeof addAudit==='function') addAudit('Catalog Linked', currentUser.fullName+' linked "'+c.product.name+'" to the warehouse catalog');
-    toast('Linked "'+c.product.name+'"');
-    catalogLinkCandidates.splice(index,1);
-    if(typeof syncWarehouseCacheFromServer === 'function') await syncWarehouseCacheFromServer();
-    renderCatalogLinkRows();
-  }catch(err){
-    console.error('Link catalog item failed:', err);
-    toast(err.message||'Could not link item','error');
-  }
+async function backfillRemainingWarehouseEntries() {
+  toast('Warehouse catalogue backfilling is not used in MRA.');
 }
-
-async function backfillRemainingWarehouseEntries(){
-  try{
-    const res = await window.LumodaSupabase.backfillWarehouseCatalog();
-    if(!res?.success){toast(res?.error||'Could not create warehouse entries','error');return;}
-    if(typeof addAudit==='function') addAudit('Catalog Backfilled', currentUser.fullName+' created '+res.created+' warehouse entr'+(res.created===1?'y':'ies')+' from products');
-    toast(res.created+' warehouse entr'+(res.created===1?'y':'ies')+' created');
-    if(typeof syncWarehouseCacheFromServer === 'function') await syncWarehouseCacheFromServer();
-    buildCatalogLinkCandidates();
-    renderCatalogLinkRows();
-  }catch(err){
-    console.error('Backfill warehouse catalog failed:', err);
-    toast(err.message||'Could not create warehouse entries','error');
-  }
-}
-

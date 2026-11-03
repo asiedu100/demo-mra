@@ -97,6 +97,12 @@ Deno.serve(async (req) => {
     .trim()
     .toLowerCase();
 
+  const branchIds = Array.from(new Set(
+    (payload.branchIds || payload.branch_ids || [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  ));
+
   const fullName = String(payload.fullName || '').trim();
 
   const role =
@@ -108,9 +114,7 @@ Deno.serve(async (req) => {
   const location =
     role === 'admin' || role === 'warehouse_manager'
       ? 'All'
-      : payload.location === 'Morocco'
-        ? 'Morocco'
-        : 'Alabar';
+      : String(payload.location || '').trim() || 'Unassigned';
 
   if (!validEmail(email)) {
     return json({
@@ -127,6 +131,12 @@ Deno.serve(async (req) => {
   if (!fullName) {
     return json({
       error: 'Full name is required.'
+    }, 400);
+  }
+
+  if (!branchIds.length) {
+    return json({
+      error: 'Assign the staff member to at least one branch.'
     }, 400);
   }
 
@@ -181,7 +191,6 @@ Deno.serve(async (req) => {
           createdUser.user.id
         );
       } catch (_) {}
-
       return json({
         error:
           profileError.message ||
@@ -189,15 +198,37 @@ Deno.serve(async (req) => {
       }, 400);
     }
 
+    const { data: branches, error: branchError } = await serviceClient
+      .from('branches')
+      .select('id')
+      .in('id', branchIds)
+      .eq('is_active', true);
+
+    if (branchError || (branches || []).length !== branchIds.length) {
+      await serviceClient.auth.admin.deleteUser(createdUser.user.id);
+      return json({
+        error: branchError?.message ||
+          'One or more selected branches are invalid or inactive.'
+      }, 400);
+    }
+
+    const { error: accessError } = await serviceClient
+      .from('user_branch_access')
+      .insert(branchIds.map(branch_id => ({
+        user_id: createdUser.user.id,
+        branch_id
+      })));
+
+    if (accessError) {
+      await serviceClient.auth.admin.deleteUser(createdUser.user.id);
+      return json({
+        error: accessError.message || 'Could not assign staff branches.'
+      }, 400);
+    }
+
     return json({
   tempPassword,
   userId: createdUser.user.id,
-
-  // debug
-  receivedRole: payload.role,
-  savedRole: role,
-  savedLocation: location,
-
   profile: profileData || upsertPayload
 });
 

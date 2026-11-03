@@ -1,7 +1,6 @@
 // ============================================================
 // CUSTOMERS
 // ============================================================
-let customerSearchFilter = '';
 function renderCustomers() {
   let customers = filterByLoc(getCustomers());
   if (customerSearchFilter) { const q=customerSearchFilter.toLowerCase(); customers=customers.filter(c=>c.name.toLowerCase().includes(q)||(c.phone||'').includes(q)); }
@@ -43,7 +42,15 @@ function suggestCustomers(val) {
   const box = document.getElementById('cust-suggestions');
   if(!val||val.length<2){box.style.display='none';return;}
   const loc=isAdmin()?document.getElementById('inv-location').value:currentUser.location;
-  const matches=getCustomers().filter(c=>c.name.toLowerCase().includes(val.toLowerCase())&&c.location===loc).slice(0,5);
+  const query = val.trim().toLowerCase();
+  const matches = getCustomers()
+    .filter(c => {
+      const customerName = String(c.name || c.customerName || '').toLowerCase();
+      const customerLocation = c.location || c.branch_id || c.branchId;
+      return customerName.includes(query) &&
+        (!customerLocation || customerLocation === loc);
+    })
+    .slice(0, 5);
   if(matches.length===0){box.style.display='none';return;}
   box.style.display='block';
   // JSON.stringify safely encodes each value as a JS string literal; escAttr then
@@ -54,5 +61,16 @@ function suggestCustomers(val) {
     return '<div style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--gray-50)" onmousedown="'+escAttr(call)+'" onmouseover="this.style.background=\'var(--gray-50)\'" onmouseout="this.style.background=\'\'"><strong>'+escapeHtml(c.name)+'</strong>'+(c.phone?'<span style="color:var(--gray-400);font-size:11px;margin-left:6px">'+escapeHtml(c.phone)+'</span>':'')+'</div>';
   }).join('');
 }
-function selectCustomerSuggestion(name,phone,addr) { document.getElementById('inv-cust-name').value=name; document.getElementById('inv-cust-phone').value=phone; document.getElementById('inv-cust-addr').value=addr; document.getElementById('cust-suggestions').style.display='none'; }
+function selectCustomerSuggestion(name,phone,addr) {
+  document.getElementById('inv-cust-name').value = name;
+  document.getElementById('inv-cust-phone').value = phone;
+  document.getElementById('inv-cust-addr').value = addr;
+  document.getElementById('cust-suggestions').style.display = 'none';
+}
 
+function hideCustomerSuggestionsDelayed() {
+  setTimeout(() => {
+    const box = document.getElementById('cust-suggestions');
+    if (box) box.style.display = 'none';
+  }, 150);
+}

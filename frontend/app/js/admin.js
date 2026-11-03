@@ -91,10 +91,24 @@ async function toggleSupabaseUserActive(userId, isActive){
   renderUsers();
 }
 
-function openCreateUserModal(){
+async function openCreateUserModal(){
   if(!requireAdmin('create users'))return;
   ['new-user-fullname','new-user-username','new-user-email'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('new-user-role').value='staff'; document.getElementById('new-user-location').value=LOCATIONS[0];
+  document.getElementById('new-user-role').value='staff';
+  const branchSelect = document.getElementById('new-user-location');
+  branchSelect.innerHTML = '<option value="">Loading branches...</option>';
+  try {
+    const branches = await getSupabaseAPI().loadBranches();
+    branchSelect.innerHTML = branches
+      .filter(branch => branch.is_active !== false)
+      .map(branch => `<option value="${escapeHtml(branch.id)}">${escapeHtml(branch.branch_name)}</option>`)
+      .join('');
+    if (!branchSelect.options.length) {
+      branchSelect.innerHTML = '<option value="">No active branches found</option>';
+    }
+  } catch (error) {
+    branchSelect.innerHTML = '<option value="">Could not load branches</option>';
+  }
   document.getElementById('create-user-error').style.display='none';
   document.getElementById('new-user-location-row').style.display='flex';
   openModal('create-user-modal');
@@ -110,9 +124,12 @@ function saveNewUser(){
   const username=document.getElementById('new-user-username').value.trim().toLowerCase();
   const email=document.getElementById('new-user-email').value.trim().toLowerCase();
   const role=document.getElementById('new-user-role').value;
-  const location=(role==='admin'||role==='warehouse_manager')?'All':document.getElementById('new-user-location').value;
+  const branchSelect = document.getElementById('new-user-location');
+  const branchId = branchSelect.value;
+  const location = branchSelect.options[branchSelect.selectedIndex]?.textContent || '';
   const errEl=document.getElementById('create-user-error'); errEl.style.display='none';
   if(!fullName||!username||!email){errEl.textContent='Full name, username, and email are required.';errEl.style.display='block';return;}
+  if(!branchId){errEl.textContent='Select an active branch for this staff member.';errEl.style.display='block';return;}
   if(!/^[a-z0-9_]{3,20}$/.test(username)){errEl.textContent='Username: 3–20 chars, letters/numbers/underscore only.';errEl.style.display='block';return;}
   if(!/^\S+@\S+\.\S+$/.test(email)){errEl.textContent='Please enter a valid email address.';errEl.style.display='block';return;}
 
@@ -121,7 +138,9 @@ function saveNewUser(){
       const actionButton = document.querySelector('#create-user-modal .btn.btn-primary');
       if (actionButton) { actionButton.disabled = true; actionButton.textContent = 'Creating...'; }
       try {
-        const result = await window.LumodaSupabase.createStaffAccount({ email, username, fullName, role, location });
+        const result = await window.LumodaSupabase.createStaffAccount({
+          email, username, fullName, role, location, branchIds: [branchId]
+        });
         addAudit('User Created', currentUser.fullName+' created Supabase account for "'+fullName+'" (@'+username+') ['+location+']');
         closeModal('create-user-modal'); renderUsers();
         showTempPasswordModal(fullName, username, result.tempPassword, location);
@@ -171,14 +190,22 @@ function copyTempPw() {
   catch (e) { toast('Could not copy password', 'error'); }
 }
 
-function resetUserPassword(userId){
+async function resetUserPassword(userId){
   if(!requireAdmin('reset passwords'))return;
-  const users=getUsers(); const idx=users.findIndex(u=>u.id===userId); if(idx<0)return;
-  const tempPw='LM'+Math.random().toString(36).substring(2,8).toUpperCase();
-  users[idx].passwordHash=hashPw(tempPw); users[idx].mustChangePassword=true; users[idx].tempPasswordExpiry=Date.now()+TEMP_PW_EXPIRY_MS; users[idx].failedLogins=0; users[idx].lockedUntil=null;
-  LS.set('lumoda_users',users);
-  addAudit('Password Reset',currentUser.fullName+' reset password for "'+users[idx].fullName+'"');
-  renderUsers(); showTempPasswordModal(users[idx].fullName,users[idx].username,tempPw,users[idx].location);
+  const profile = (await getSupabaseAPI()?.loadProfiles?.() || [])
+    .find(user => user.id === userId);
+  if (!profile?.email) {
+    toast('This user has no email address for password recovery.', 'error');
+    return;
+  }
+  if (!confirm(`Send password reset instructions to ${profile.email}?`)) return;
+  try {
+    await getSupabaseAPI().sendPasswordResetEmail(profile.email);
+    addAudit('Password Reset Requested', `${currentUser.fullName} sent password reset instructions to "${profile.full_name}"`);
+    toast('Password reset instructions sent');
+  } catch (error) {
+    toast(error.message || 'Could not send password reset instructions.', 'error');
+  }
 }
 
 function toggleUserActive(userId){
@@ -238,7 +265,7 @@ async function renderAuditLog() {
   // FIX BUG 3: Load from Supabase first, fall back to localStorage
   if (window.LumodaSupabase && window.LumodaSupabase.isConfigured()) {
     try {
-      const localLogs = LS.get('lumoda_audit') || [];
+      const localLogs = LS.get('audit') || [];
       const localOnlyLogs = localLogs.filter(a =>
         a.localOnly === true ||
         String(a.action || '').includes('Queued Offline') ||
@@ -246,21 +273,31 @@ async function renderAuditLog() {
       );
       const serverLogs = await window.LumodaSupabase.loadAuditLogs();
       if (Array.isArray(serverLogs) && serverLogs.length > 0) {
-        const seen = new Set(serverLogs.map(a => [a.action, a.detail, a.createdAt].join('|')));
-        const merged = serverLogs.concat(localOnlyLogs.filter(a => {
+        const normalizedServerLogs = serverLogs.map(a => ({
+          id: a.id,
+          action: a.action,
+          detail: typeof a.details === 'object'
+            ? JSON.stringify(a.details)
+            : (a.details || a.detail || ''),
+          by: a.user_id || a.created_by || 'system',
+          byName: a.created_by_name || a.user_name || 'system',
+          createdAt: new Date(a.created_at || Date.now()).getTime()
+        }));
+        const seen = new Set(normalizedServerLogs.map(a => [a.action, a.detail, a.createdAt].join('|')));
+        const merged = normalizedServerLogs.concat(localOnlyLogs.filter(a => {
           const key = [a.action, a.detail, a.createdAt].join('|');
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
         })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 1000);
-        LS.set('lumoda_audit', merged);
+        LS.set('audit', merged);
       }
     } catch (e) {
       console.warn('Could not load audit logs from server:', e);
     }
   }
 
-  const log = LS.get('lumoda_audit') || [];
+  const log = LS.get('audit') || [];
   document.getElementById('audit-list').innerHTML = log.length
     ? log.map(a =>
         '<div class="audit-item"><div class="audit-dot"></div><div>' +

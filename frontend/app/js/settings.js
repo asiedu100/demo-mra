@@ -33,6 +33,11 @@ async function renderSettings() {
   if (bizCard) bizCard.style.display = '';
   if (backupCard) backupCard.style.display = '';
 
+  const profileName = document.getElementById('set-profile-name');
+  const profileEmail = document.getElementById('set-profile-email');
+  if (profileName) profileName.value = currentUser?.fullName || '';
+  if (profileEmail) profileEmail.value = currentUser?.email || '';
+
   try {
     const settings = await window.LumodaSupabase.loadBusinessSettings();
     document.getElementById('set-business-name').value = settings.business_name || '';
@@ -48,10 +53,51 @@ async function renderSettings() {
     applyBrandColor(settings.brand_color);
     applyLogo(settings.logo_url);
     applyBusinessName(settings.business_name);
-    LS.set('lumoda_business_settings', settings);
+    cacheBusinessSettings(settings);
   } catch (error) {
     console.error('Could not load business settings:', error);
     toast('Could not load business settings', 'error');
+  }
+
+  async function saveMyProfile() {
+    const input = document.getElementById('set-profile-name');
+    const errorElement = document.getElementById('set-profile-error');
+    const fullName = String(input?.value || '').trim();
+
+    if (errorElement) {
+      errorElement.textContent = '';
+      errorElement.style.display = 'none';
+    }
+
+    if (!fullName) {
+      if (errorElement) {
+        errorElement.textContent = 'Your name is required.';
+        errorElement.style.display = 'block';
+      }
+      return;
+    }
+
+    try {
+      const api = getSupabaseAPI();
+      if (!api?.updateMyProfile) throw new Error('Profile editing is unavailable.');
+
+      const profile = await api.updateMyProfile({ fullName });
+      currentUser = normalizeUser({
+        ...currentUser,
+        fullName: profile.full_name,
+        full_name: profile.full_name
+      });
+      api.cacheSessionUser?.(currentUser);
+      if (typeof updateUserUI === 'function') updateUserUI();
+      addAudit('Profile Updated', `${currentUser.fullName} updated their profile name`);
+      toast('Profile updated successfully');
+    } catch (error) {
+      console.error('Could not update profile:', error);
+      if (errorElement) {
+        errorElement.textContent = error.message || 'Could not update profile.';
+        errorElement.style.display = 'block';
+      }
+    }
   }
 }
 
@@ -149,7 +195,11 @@ async function saveBusinessSettingsForm() {
     // Update the local cache immediately — without this, fmtGHS()/reorder
     // defaults/brand colour would keep showing the old values until the
     // next full login sync, even though the save itself succeeded.
-    if (saved) { LS.set('lumoda_business_settings', saved); applyBrandColor(saved.brand_color); applyBusinessName(saved.business_name); }
+    if (saved) {
+      const cached = cacheBusinessSettings(saved);
+      applyBrandColor(cached.brand_color);
+      applyBusinessName(cached.business_name);
+    }
     addAudit('Business Settings Updated', `${currentUser.fullName} updated business settings`);
     toast('Business settings saved');
   } catch (error) {

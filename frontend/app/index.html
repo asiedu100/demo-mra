@@ -1,20 +1,24 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <link rel="icon" type="image/jpeg" href="/lumo.jpeg">
-<link rel="apple-touch-icon" href="/lumo.jpeg">
+  <link rel="icon" type="image/png" href="../MRA.png">
+<link rel="apple-touch-icon" href="../MRA.png">
 
-<meta property="og:title" content="Lumoda Enterprise">
-<meta property="og:description" content="Inventory, Sales & Warehouse Management System">
-<meta property="og:image" content="https://lumoda.netlify.app/lumo.jpeg">
-<meta property="og:url" content="https://lumoda.netlify.app">
+<meta property="og:title" content="MRA Systems">
+<meta property="og:description" content="MRA Systems – Business Management, Inventory and Sales">
+<meta property="og:image" content="../MRA.png">
+<meta property="og:url" content="https://YOUR-MRA-SITE.netlify.app">
 <meta property="og:type" content="website">
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LUMODA ENTERPRISE</title>
+<title>MRA Systems</title>
+
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0a0a0a">
+
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -49,7 +53,7 @@
 <div id="auth-screen" class="full-screen">
   <div class="auth-card">
     <div style="text-align:center;margin-bottom:20px">
-      <svg id="auth-logo-svg" width="76" height="76" viewBox="0 0 96 96" fill="none">
+      <svg id="auth-logo-svg" width="76" height="76" viewBox="0 0 96 96" fill="none" style="display:none">
         <defs><clipPath id="dc"><rect x="22" y="22" width="52" height="52" rx="7" transform="rotate(45 48 48)"/></clipPath></defs>
         <rect x="22" y="22" width="52" height="52" rx="7" transform="rotate(45 48 48)" fill="#5C2D0A"/>
         <polygon points="48,8 80,48 48,48" fill="#F5B800" clip-path="url(#dc)"/>
@@ -57,13 +61,13 @@
         <polygon points="48,48 80,48 48,88" fill="#7AB033" clip-path="url(#dc)"/>
         <polygon points="48,48 48,88 16,48" fill="#4A2208" clip-path="url(#dc)"/>
       </svg>
-      <img id="auth-logo-img" style="display:none;width:76px;height:76px;object-fit:contain;margin:0 auto" alt="Logo">
-      <div id="auth-business-name" style="font-size:25px;font-weight:700;color:var(--accent);letter-spacing:.08em;margin-top:6px">LUMODA ENTERPRISE</div>
-      <div style="font-family:'Instrument Serif',serif;font-style:italic;font-size:13px;color:var(--gray-400);margin-top:2px">The cook's helper</div>
-      <div style="font-size:9px;color:var(--brand-red);font-weight:600;letter-spacing:.1em;margin-top:5px;font-family:'DM Mono',monospace">  MAA LUCY'S PLACE</div>
+      <img id="auth-logo-img" src="../MRA.png?v=2" style="display:block;width:280px;height:auto;max-width:100%;object-fit:contain;margin:0 auto" alt="MRA Systems logo">
+      <div id="auth-business-name" style="font-size:25px;font-weight:700;color:var(--accent);letter-spacing:.08em;margin-top:6px">MRA Systems</div>
+      <div style="font-family:'Instrument Serif',serif;font-style:italic;font-size:13px;color:var(--gray-400);margin-top:2px"></div>
+      <div style="font-size:9px;color:var(--brand-red);font-weight:600;letter-spacing:.1em;margin-top:5px;font-family:'DM Mono',monospace">  </div>
     </div>
-    <label class="auth-label">Username</label>
-    <input class="auth-input" id="auth-user" placeholder="Your username" autocomplete="off" onkeydown="if(event.key==='Enter')document.getElementById('auth-pass').focus()">
+    <label class="auth-label">Email</label>
+    <input class="auth-input" id="auth-user" type="email" placeholder="you@example.com" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('auth-pass').focus()">
     <label class="auth-label">Password</label>
     <div class="pw-field">
       <input class="auth-input" id="auth-pass" type="password" placeholder="Your password" onkeydown="if(event.key==='Enter')doLogin()">
@@ -72,7 +76,8 @@
     <label style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;font-size:12px;color:var(--gray-500)"><input id="remember-login" type="checkbox" style="width:14px;height:14px;margin:0"> Keep me signed in on this device</label>
     <div class="auth-error" id="auth-error"></div>
     <button class="auth-btn" onclick="doLogin()">Sign In →</button>
-    <div style="text-align:center;margin-top:14px;font-size:10px;color:var(--gray-400);font-family:'DM Mono',monospace;line-height:1.9">TEL: 0244369357 / 0546014044 / 0243563481<br>Alabar &nbsp;|&nbsp; Morocco (K.O)</div>
+    <button type="button" class="btn btn-link" style="display:block;width:100%;margin-top:10px;font-size:12px" onclick="sendForgotPassword()">Forgot password?</button>
+    <div style="text-align:center;margin-top:14px;font-size:10px;color:var(--gray-400);font-family:'DM Mono',monospace;line-height:1.9">TEL: 0502013000 / 0201823110<br>Kumasi &nbsp;</div>
     <div style="
   text-align:center;
   margin-top:16px;
@@ -92,7 +97,7 @@
   <div class="auth-card">
     <div style="text-align:center;margin-bottom:20px">
       <div class="wiz-icon" id="boot-welcome-icon" style="display:none">👋</div>
-      <img src="icons/mra-logo.png" alt="MRA Systems logo" style="display:block;max-width:76px;max-height:76px;margin:0 auto;object-fit:contain" onerror="this.style.display='none';document.getElementById('boot-welcome-icon').style.display=''">
+      <img src="../MRA.png" alt="MRA Systems logo" style="display:block;max-width:76px;max-height:76px;margin:0 auto;object-fit:contain" onerror="this.style.display='none';document.getElementById('boot-welcome-icon').style.display=''">
       <div style="font-size:20px;font-weight:700;color:var(--accent);letter-spacing:.04em;margin-top:10px">Welcome to MRA Systems</div>
       <div style="font-size:13px;color:var(--gray-400);margin-top:4px">Let's set up your admin account to get started</div>
     </div>
@@ -166,7 +171,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
       <div style="display:flex;align-items:center;gap:10px;padding-bottom:13px">
-        <svg id="sidebar-logo-svg" width="32" height="32" viewBox="0 0 34 34" fill="none">
+        <svg id="sidebar-logo-svg" width="32" height="32" viewBox="0 0 34 34" fill="none" style="display:none">
           <defs><clipPath id="sc"><rect x="5" y="5" width="24" height="24" rx="3" transform="rotate(45 17 17)"/></clipPath></defs>
           <rect x="5" y="5" width="24" height="24" rx="3" transform="rotate(45 17 17)" fill="rgba(255,255,255,.15)"/>
           <polygon points="17,2 28,17 17,17" fill="#F5B800" clip-path="url(#sc)"/>
@@ -174,10 +179,10 @@
           <polygon points="17,17 28,17 17,32" fill="#7AB033" clip-path="url(#sc)"/>
           <polygon points="17,17 17,32 6,17" fill="rgba(255,255,255,.2)" clip-path="url(#sc)"/>
         </svg>
-        <img id="sidebar-logo-img" style="display:none;width:32px;height:32px;object-fit:contain;border-radius:6px" alt="Logo">
+        <img id="sidebar-logo-img" src="../MRA.png?v=2" style="display:block;width:112px;height:auto;max-width:100%;object-fit:contain;border-radius:4px" alt="MRA Systems logo">
         <div>
-          <div id="sidebar-business-name-1" style="font-size:15px;font-weight:700;color:var(--white);letter-spacing:.06em">LUMODA</div>
-          <div id="sidebar-business-name-2" style="font-size:9px;color:rgba(255,255,255,.32);letter-spacing:.08em;font-family:'DM Mono',monospace">ENTERPRISE</div>
+          <div id="sidebar-business-name-1" style="font-size:15px;font-weight:700;color:var(--white);letter-spacing:.06em">MRA</div>
+          <div id="sidebar-business-name-2" style="font-size:9px;color:rgba(255,255,255,.32);letter-spacing:.08em;font-family:'DM Mono',monospace">Systems</div>
         </div>
       </div>
     </div>
@@ -355,7 +360,7 @@
             <div style="flex:1"></div>
             <button class="btn btn-secondary btn-sm" id="btn-order-stock" onclick="orderStock()" style="display:none">📋 Order Stock</button>
             <button class="btn btn-secondary btn-sm" id="btn-link-warehouse" onclick="openCatalogLinkModal()" style="display:none">🔗 Link to Warehouse Catalog</button>
-            <button class="btn btn-secondary btn-sm" id="btn-import-csv" onclick="openCsvModal()" style="display:none">⬆ Import CSV</button>
+            <button class="btn btn-secondary btn-sm" id="btn-import-csv" onclick="openCsvModal()" style="display:none">⬆ Import Spreadsheet (CSV)</button>
             <button class="btn btn-primary" id="btn-add-product" onclick="openProductModal()" style="display:none">+ New Product</button>
           </div>
           <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Price</th><th>Alabar Stock</th><th>Morocco Stock</th><th>Status</th><th>Reorder At</th><th></th></tr></thead><tbody id="products-body"></tbody></table></div>
@@ -487,6 +492,18 @@
             <div class="card-title">My Settings</div>
           </div>
           <div style="padding:20px;max-width:420px">
+            <div style="padding-bottom:20px;margin-bottom:20px;border-bottom:1px solid var(--gray-100)">
+              <div class="form-group">
+                <label class="form-label">Profile name</label>
+                <input class="form-input" id="set-profile-name" autocomplete="name" placeholder="Your full name">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Email</label>
+                <input class="form-input" id="set-profile-email" type="email" readonly style="background:var(--gray-50);color:var(--gray-500)">
+              </div>
+              <div class="form-error" id="set-profile-error" style="display:none;color:#c0392b;font-size:12px;margin-bottom:10px"></div>
+              <button class="btn btn-primary btn-sm" onclick="saveMyProfile()">Save Profile</button>
+            </div>
             <div class="form-group" id="set-landing-page-group">
               <label class="form-label">Landing page after login</label>
               <select class="form-select" id="set-landing-page"></select>
@@ -575,7 +592,7 @@
       <div class="form-grid" id="inv-fg-name-phone">
         <div class="form-group">
           <label class="form-label">Customer Name *</label>
-          <input class="form-input" id="inv-cust-name" placeholder="Type or select…" oninput="suggestCustomers(this.value)" autocomplete="off">
+          <input class="form-input" id="inv-cust-name" placeholder="Type or select…" oninput="suggestCustomers(this.value)" onblur="hideCustomerSuggestionsDelayed()" autocomplete="off">
           <div id="cust-suggestions" style="border:1px solid var(--gray-100);border-radius:var(--radius);margin-top:2px;display:none;background:var(--white);max-height:130px;overflow-y:auto;position:relative;z-index:10"></div>
         </div>
         <div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="inv-cust-phone" placeholder="0244123456"></div>
@@ -881,7 +898,7 @@
       <div class="form-group"><label class="form-label">Email *</label><input class="form-input" type="email" id="new-user-email" placeholder="e.g. john@example.com" autocomplete="email"></div>
       <div class="form-grid">
         <div class="form-group"><label class="form-label">Role</label><select class="form-select" id="new-user-role" onchange="onNewUserRoleChange()"><option value="staff">Staff</option><option value="warehouse_manager">Warehouse Manager</option><option value="admin">Admin</option></select></div>
-        <div class="form-group" id="new-user-location-row"><label class="form-label">Branch *</label><select class="form-select" id="new-user-location"><option value="Alabar">Alabar</option><option value="Morocco">Morocco</option></select></div>
+        <div class="form-group" id="new-user-location-row"><label class="form-label">Branch *</label><select class="form-select" id="new-user-location"><option value="">Select a branch</option></select></div>
       </div>
       <div class="form-error" id="create-user-error"></div>
       <div style="background:#fef9c3;border:1px solid #fde047;border-radius:var(--radius);padding:9px 12px;font-size:12px;color:#854d0e;margin-top:4px">A temporary password will be auto-generated. Staff must change it on first login.</div>
@@ -935,12 +952,12 @@
     <div class="modal-body">
       <div class="wiz-step active" data-step="1">
         <div class="wiz-icon" id="wiz-welcome-icon" style="display:none">👋</div>
-        <img src="icons/mra-logo.png" alt="MRA Systems logo" style="display:block;max-width:120px;max-height:120px;margin:0 auto 14px;object-fit:contain" onerror="this.style.display='none';document.getElementById('wiz-welcome-icon').style.display=''">
+        <img src="../MRA.png" alt="MRA Systems logo" style="display:block;max-width:120px;max-height:120px;margin:0 auto 14px;object-fit:contain" onerror="this.style.display='none';document.getElementById('wiz-welcome-icon').style.display=''">
         <h2 style="text-align:center;font-size:18px;font-weight:600;margin:0 0 10px">Welcome to MRA Systems</h2>
         <p style="text-align:center;font-size:14px;color:var(--gray-600);line-height:1.6">Let's get your business set up — this only takes a minute. You can always change these later in Settings.</p>
       </div>
       <div class="wiz-step" data-step="2">
-        <div class="form-group"><label class="form-label">Business Name *</label><input class="form-input" id="wiz-business-name" placeholder="e.g. Lumoda Enterprise"></div>
+        <div class="form-group"><label class="form-label">Business Name *</label><input class="form-input" id="wiz-business-name" placeholder="e.g. MRA Systems"></div>
         <div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="wiz-phone" placeholder="e.g. 0244 369 357"></div>
         <div class="form-group"><label class="form-label">Address</label><input class="form-input" id="wiz-address" placeholder="e.g. Alabar & Morocco (K.O), Kumasi"></div>
         <div class="form-error" id="wiz-step2-error" style="display:none;color:#c0392b;font-size:12px"></div>
@@ -1044,8 +1061,8 @@
     <div class="modal-body">
       <div style="background:var(--gray-50);border:2px dashed var(--gray-200);border-radius:var(--radius);padding:24px;text-align:center;margin-bottom:16px">
         <div style="font-size:24px;margin-bottom:8px">📂</div>
-        <div style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Select a CSV file to import products</div>
-        <input type="file" id="csv-file-input" accept=".csv" onchange="parseCsvFile(this)" style="font-size:13px;font-family:var(--font-sans)">
+        <div style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Save your Excel or spreadsheet as CSV, then select it here.</div>
+        <input type="file" id="csv-file-input" accept=".csv,text/csv" onchange="parseCsvFile(this)" style="font-size:13px;font-family:var(--font-sans)">
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <div style="font-size:12px;color:var(--gray-400)">Required columns: <code style="background:var(--gray-50);padding:2px 6px;border-radius:3px">Name, Price</code> &nbsp; Optional: <code style="background:var(--gray-50);padding:2px 6px;border-radius:3px">SKU, Category, AlabarStock, MoroccoStock, ReorderLevel</code></div>
@@ -1643,17 +1660,18 @@ KT001,Kettle,30,10,85</pre>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script src="supabase-client.js"></script>
-<script src="js/core.js"></script>
-<script src="js/auth.js"></script>
+<script src="js/core.js?v=3"></script>
+<script src="js/auth.js?v=3"></script>
+<script src="js/invoice-domain.js?v=1"></script>
 <script src="js/invoices.js"></script>
 <script src="js/customers.js"></script>
 <script src="js/products.js"></script>
 <script src="js/dashboard.js"></script>
 <script src="js/reports.js"></script>
-<script src="js/admin.js"></script>
-<script src="js/settings.js"></script>
+<script src="js/admin.js?v=2"></script>
+<script src="js/settings.js?v=2"></script>
 <script src="js/onboarding.js"></script>
 <script src="js/bootstrap.js"></script>
-<script src="warehouse.js"></script>
+
 </body>
 </html>
