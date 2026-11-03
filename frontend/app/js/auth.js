@@ -552,7 +552,18 @@
       const session = sessionData?.session;
 
       if (!session?.user?.id) {
-        showAuthScreen();
+        const cachedUser = api.getCachedSessionUser?.();
+        if (cachedUser?.id) {
+          currentUser = cachedUser;
+          currentLocation = currentUser.role === 'admin'
+            ? 'All'
+            : (currentUser.branchIds?.[0] || null);
+          isOfflineSession = true;
+          showApp();
+          toast('Session could not be refreshed. Showing saved data.', 'error');
+        } else {
+          showAuthScreen();
+        }
         return;
       }
 
@@ -639,10 +650,19 @@
         } catch (signOutError) {
           console.warn('Could not clear invalid session:', signOutError);
         }
-        api.clearCachedSessionUser?.();
         currentUser = null;
-        clearUserScopedState();
-        showAuthScreen();
+        const cachedUser = api.getCachedSessionUser?.();
+        if (cachedUser?.id) {
+          currentUser = cachedUser;
+          currentLocation = currentUser.role === 'admin'
+            ? 'All'
+            : (currentUser.branchIds?.[0] || null);
+          isOfflineSession = true;
+          showApp();
+          toast('Session verification failed. Showing saved data.', 'error');
+        } else {
+          showAuthScreen();
+        }
       } else {
         const cachedUser = api.getCachedSessionUser?.();
         if (cachedUser?.id) {
