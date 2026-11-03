@@ -41,7 +41,7 @@ async function renderUsers() {
       users = profiles.map(profile => ({
         id: profile.id, email: profile.email || '', username: profile.username,
         fullName: profile.full_name, role: profile.role, location: profile.location,
-        active: profile.active !== false, mustChangePassword: !!profile.must_change_password,
+        active: profile.is_active !== false, mustChangePassword: !!profile.must_change_password,
         lockedUntil: null, lastLogin: profile.last_login ? new Date(profile.last_login).getTime() : null
       }));
     } catch (error) { console.warn('Could not load Supabase profiles.', error); }
@@ -85,8 +85,14 @@ async function renderUsers() {
 async function toggleSupabaseUserActive(userId, isActive){
   if(!requireAdmin('manage users')) return;
   const sb = window.LumodaSupabase.getClient();
-  const { error } = await sb.from('profiles').update({ active: !isActive }).eq('id', userId);
-  if (error) { console.error(error); toast('Could not update user status', 'error'); return; }
+  const { error } = await sb.from('profiles')
+    .update({ is_active: !isActive })
+    .eq('id', userId);
+  if (error) {
+    console.error('Could not update user status:', error);
+    toast(error.message || 'Could not update user status', 'error');
+    return;
+  }
   toast(isActive ? 'User deactivated' : 'User activated');
   renderUsers();
 }
