@@ -455,7 +455,11 @@
         setAutoLoginAllowed(!!rememberInput?.checked);
       }
 
-      showApp();
+      if (data.user?.user_metadata?.must_change_password === true) {
+        showChangePwScreen();
+      } else {
+        showApp();
+      }
 
     } catch (error) {
       console.error('MRA login error:', error);
@@ -566,7 +570,11 @@
       await initializeUserBranches();
       await syncSupabaseCache();
 
-      showApp();
+      if (authUser.user_metadata?.must_change_password === true) {
+        showChangePwScreen();
+      } else {
+        showApp();
+      }
       if (isPasswordRecoveryRedirect()) {
         toast('Set a new password to finish account recovery.', 'info');
         setTimeout(() => {
@@ -593,10 +601,6 @@
         showApp();
         toast('Offline mode: reconnect to refresh business data.', 'info');
         return;
-      }
-
-      function isPasswordRecoveryRedirect() {
-        return /(?:^|[#&])type=recovery(?:&|$)/i.test(window.location.hash || '');
       }
 
       // Only clear authentication when Supabase confirms that the session is
@@ -880,10 +884,16 @@
   // MRA staff accounts are created through the admin interface
   // and the create-staff-account Edge Function.
   function showChangePwScreen() {
-    toast(
-      'Password changes must be handled through account settings.',
-      'error'
-    );
+    setDisplay('auth-screen', 'none');
+    setDisplay('app', 'none');
+    setDisplay('bootstrap-admin-screen', 'none');
+    setDisplay('change-pw-screen', 'flex');
+    const nameElement = getElement('change-pw-name');
+    if (nameElement) {
+      nameElement.textContent =
+        `Welcome ${currentUser?.fullName || 'to MRA Systems'}`;
+    }
+    getElement('new-pw')?.focus();
   }
 
   async function doChangePassword() {
@@ -913,12 +923,20 @@
       const sb = getSupabaseClient();
 
       const { error } = await sb.auth.updateUser({
-        password: newPassword
+        password: newPassword,
+        data: {
+          ...(currentUser?.user_metadata || {}),
+          must_change_password: false
+        }
       });
 
       if (error) throw error;
 
       setDisplay('change-pw-screen', 'none');
+
+      if (window.history?.replaceState && isPasswordRecoveryRedirect()) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
 
       toast('Password updated successfully.');
 
@@ -928,6 +946,12 @@
       showError(
         'change-pw-error',
         error.message || 'Could not update your password.'
+      );
+    }
+
+    function isPasswordRecoveryRedirect() {
+      return /(?:^|[#&])type=recovery(?:&|$)/i.test(
+        window.location.hash || ''
       );
     }
   }
