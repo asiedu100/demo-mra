@@ -1407,25 +1407,180 @@
     unsupported('Warehouse catalog migration');
   }
 
-  // Old warehouse methods are intentionally disabled.
-  async function postWarehouseMovementDirect() {
-    unsupported('Warehouse movements');
+  async function resolveWarehouseProduct(item = {}) {
+    const sb = requireClient();
+    const sku = String(item.itemCode || item.sku || '').trim();
+    const name = String(item.description || item.itemName || item.name || '').trim();
+    let query = sb.from('products').select(
+      'id, product_name, sku, selling_price, reorder_level, unit_name'
+    ).eq('is_active', true);
+
+    if (sku) query = query.eq('sku', sku);
+    else if (name) query = query.ilike('product_name', name);
+    else throw new Error('A product SKU or name is required.');
+
+    const { data, error } = await query.limit(1).maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      throw new Error(
+        `Product not found: ${sku || name}. Add it in Products before recording stock.`
+      );
+    }
+    return data;
+  }
+
+  async function postWarehouseMovementDirect(payload = {}) {
+    const sb = requireClient();
+    const branchId = String(payload.warehouse_id || payload.warehouseId || '').trim();
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (!branchId) throw new Error('Choose a branch before recording stock.');
+    if (!items.length) throw new Error('At least one product is required.');
+
+    const type = String(payload.type || '').trim().toLowerCase();
+    const movementType = type === 'opening_balance' ? 'opening_stock' : type;
+    if (!['opening_stock', 'stock_in', 'stock_out', 'adjustment', 'transfer'].includes(movementType)) {
+      throw new Error('Unsupported warehouse movement type.');
+    }
+
+    const destinationId = String(
+      payload.to_warehouse_id || payload.toWarehouseId || ''
+    ).trim();
+    const processed = [];
+
+    for (const item of items) {
+      const quantity = Number(item.cartons || item.quantity || 0);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        throw new Error('Stock quantities must be greater than zero.');
+      }
+
+      const product = await resolveWarehouseProduct(item);
+      const { data: current, error: currentError } = await sb
+        .from('branch_inventory')
+        .select('id, quantity')
+        .eq('branch_id', branchId)
+        .eq('product_id', product.id)
+        .maybeSingle();
+      if (currentError) throw currentError;
+
+      const before = Number(current?.quantity || 0);
+      const delta = movementType === 'stock_out' || movementType === 'transfer'
+        ? -quantity
+        : quantity;
+      const after = before + delta;
+      if (after < 0) {
+        throw new Error(
+          `${product.product_name} has only ${before} available in this branch.`
+        );
+      }
+
+      const inventoryResult = current
+        ? await sb.from('branch_inventory')
+          .update({ quantity: after, updated_at: new Date().toISOString() })
+          .eq('id', current.id)
+          .select('id, quantity')
+          .single()
+        : await sb.from('branch_inventory')
+          .insert({ branch_id: branchId, product_id: product.id, quantity: after })
+          .select('id, quantity')
+          .single();
+      if (inventoryResult.error) throw inventoryResult.error;
+
+      const historyResult = await sb.from('stock_history').insert({
+        branch_id: branchId,
+        product_id: product.id,
+        movement_type: movementType,
+        quantity_change: delta,
+        quantity_before: before,
+        quantity_after: after,
+        reason: String(payload.notes || payload.description || 'Warehouse movement').trim() || null
+      }).select('id, created_at').single();
+      if (historyResult.error) throw historyResult.error;
+
+      if (movementType === 'transfer') {
+        if (!destinationId || destinationId === branchId) {
+          throw new Error('Choose a different destination branch for a transfer.');
+        }
+        const { data: destination, error: destinationError } = await sb
+          .from('branch_inventory')
+          .select('id, quantity')
+          .eq('branch_id', destinationId)
+          .eq('product_id', product.id)
+          .maybeSingle();
+        if (destinationError) throw destinationError;
+        const destinationBefore = Number(destination?.quantity || 0);
+        const destinationAfter = destinationBefore + quantity;
+        const destinationResult = destination
+          ? await sb.from('branch_inventory')
+            .update({ quantity: destinationAfter, updated_at: new Date().toISOString() })
+            .eq('id', destination.id)
+          : await sb.from('branch_inventory')
+            .insert({ branch_id: destinationId, product_id: product.id, quantity: destinationAfter });
+        if (destinationResult.error) throw destinationResult.error;
+        const destinationHistory = await sb.from('stock_history').insert({
+          branch_id: destinationId,
+          product_id: product.id,
+          movement_type: 'transfer',
+          quantity_change: quantity,
+          quantity_before: destinationBefore,
+          quantity_after: destinationAfter,
+          reason: String(payload.notes || 'Warehouse transfer').trim() || null
+        });
+        if (destinationHistory.error) throw destinationHistory.error;
+      }
+
+      processed.push({
+        itemCode: product.sku || '',
+        description: product.product_name,
+        cartons: quantity
+      });
+    }
+
+    return { success: true, type: movementType, items: processed };
   }
 
   async function loadWarehouseStockBalance() {
-    unsupported('Warehouse stock balance');
+    const sb = requireClient();
+    const { data, error } = await sb
+      .from('branch_inventory')
+      .select(`
+        id,
+        branch_id,
+        product_id,
+        quantity,
+        updated_at,
+        products (
+          product_name,
+          sku,
+          selling_price,
+          reorder_level
+        )
+      `)
+      .order('updated_at', { ascending: false });
+    if (error) throw error;
+    return (data || []).map(row => ({
+      id: row.id,
+      warehouse_id: row.branch_id,
+      item_code: row.products?.sku || '',
+      item_name: row.products?.product_name || '',
+      total_cartons: Number(row.quantity || 0),
+      reserved_cartons: 0,
+      available_cartons: Number(row.quantity || 0),
+      reorder_level: Number(row.products?.reorder_level || 0),
+      unit_price: Number(row.products?.selling_price || 0),
+      updated_at: row.updated_at
+    }));
   }
 
-  async function saveWarehouseStockOut() {
-    unsupported('Warehouse stock-out');
+  async function saveWarehouseStockOut(payload = {}) {
+    return postWarehouseMovementDirect({ ...payload, type: 'stock_out' });
   }
 
-  async function saveWarehouseMovement() {
-    unsupported('Warehouse movements');
+  async function saveWarehouseMovement(payload = {}) {
+    return postWarehouseMovementDirect(payload);
   }
 
-  async function saveWarehouseProduct() {
-    unsupported('Separate warehouse products');
+  async function saveWarehouseProduct(payload = {}) {
+    return saveProduct(payload);
   }
 
   async function deleteWarehouseProduct() {
@@ -1441,11 +1596,42 @@
   }
 
   async function loadWarehouseMovements() {
-    return [];
+    const sb = requireClient();
+    const { data, error } = await sb
+      .from('stock_history')
+      .select(`
+        id, branch_id, product_id, movement_type, quantity_change,
+        quantity_before, quantity_after, reason, created_at,
+        products (product_name, sku)
+      `)
+      .order('created_at', { ascending: false })
+      .limit(1000);
+    if (error) throw error;
+    return (data || []).map(row => ({
+      id: row.id,
+      warehouse_id: row.branch_id,
+      type: row.movement_type,
+      description: row.products?.product_name || row.products?.sku || 'Product movement',
+      cartons: Math.abs(Number(row.quantity_change || 0)),
+      notes: row.reason || '',
+      items: [{
+        itemCode: row.products?.sku || '',
+        description: row.products?.product_name || '',
+        cartons: Math.abs(Number(row.quantity_change || 0))
+      }],
+      created_at: row.created_at,
+      status: 'executed'
+    }));
   }
 
   async function loadWarehouseProducts() {
-    return [];
+    const products = await loadProducts();
+    return products.map(product => ({
+      id: product.id,
+      sku: product.sku || '',
+      name: product.product_name || product.name || '',
+      reorder_level: Number(product.reorder || product.reorder_level || 0)
+    }));
   }
 
   async function loadWarehouseSuppliers() {
@@ -1454,7 +1640,14 @@
 
   // MRA branches replace the old warehouse concept.
   async function loadWarehouses() {
-    return loadBranches();
+    const branches = await loadBranches();
+    return branches.map(branch => ({
+      id: branch.id,
+      code: branch.branch_code || '',
+      name: branch.branch_name,
+      address: branch.address || '',
+      active: branch.is_active !== false
+    }));
   }
 
   async function saveWarehouse(payload = {}) {

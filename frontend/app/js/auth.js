@@ -1070,6 +1070,7 @@
       'invoices',
       'customers',
       'products',
+      'warehouse',
       'stockhistory',
       'settings'
     ];
@@ -1090,10 +1091,9 @@
       }
     });
 
-    // Remove legacy warehouse and approval navigation until their server
-    // operations are backed by the confirmed demo schema.
+    // Hide only the unfinished dedicated warehouse-management and approvals
+    // pages. The branch-backed Warehouse page is supported by the demo schema.
     [
-      'nav-warehouse',
       'nav-warehouses',
       'nav-approvals'
     ].forEach(id => {
