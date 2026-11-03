@@ -435,8 +435,12 @@
         );
       }
 
-      // Remove data belonging to any previous user.
-      clearUserScopedState();
+      // Do not erase the current user's offline cache on a normal login.
+      // Only clear it when a different cached account is signing in.
+      const cachedSessionUser = api.getCachedSessionUser?.();
+      if (cachedSessionUser?.id && cachedSessionUser.id !== userId) {
+        clearUserScopedState();
+      }
       currentUser = await buildCurrentUser(profile);
       api.cacheSessionUser?.(currentUser);
 
