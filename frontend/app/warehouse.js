@@ -233,22 +233,26 @@ function normalizeWarehouseBalance(row) {
 // ============================================================
 async function syncWarehouseCacheFromServer() {
   if (!isWarehouseSyncEnabled()) return;
-  try {
-    const [movements, products, suppliers, balances, warehouses] = await Promise.all([
-      window.LumodaSupabase.loadWarehouseMovements?.().catch(() => []),
-      window.LumodaSupabase.loadWarehouseProducts?.().catch(() => []),
-      window.LumodaSupabase.loadWarehouseSuppliers?.().catch(() => []),
-      window.LumodaSupabase.loadWarehouseStockBalance?.().catch(() => []),
-      window.LumodaSupabase.loadWarehouses?.().catch(() => [])
-    ]);
-    if (Array.isArray(movements)) saveWarehouseMovementsLocal(movements.map(normalizeWarehouseMovement));
-    if (Array.isArray(products))  saveWarehouseProductsLocal(products.map(normalizeWarehouseProduct));
-    if (Array.isArray(suppliers)) saveWarehouseSuppliersLocal(suppliers.map(normalizeWarehouseSupplier));
-    if (Array.isArray(balances))  saveWarehouseBalancesLocal(balances.map(normalizeWarehouseBalance));
-    if (Array.isArray(warehouses)) saveWarehousesLocal(warehouses.map(normalizeWarehouse));
-  } catch (error) {
-    console.warn('Warehouse sync failed', error);
-  }
+  const results = await Promise.allSettled([
+    window.LumodaSupabase.loadWarehouseMovements?.(),
+    window.LumodaSupabase.loadWarehouseProducts?.(),
+    window.LumodaSupabase.loadWarehouseSuppliers?.(),
+    window.LumodaSupabase.loadWarehouseStockBalance?.(),
+    window.LumodaSupabase.loadWarehouses?.()
+  ]);
+  const [movements, products, suppliers, balances, warehouses] = results.map(result =>
+    result.status === 'fulfilled' ? result.value : null
+  );
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.warn('Warehouse data loading failed', index, result.reason);
+    }
+  });
+  if (Array.isArray(movements)) saveWarehouseMovementsLocal(movements.map(normalizeWarehouseMovement));
+  if (Array.isArray(products))  saveWarehouseProductsLocal(products.map(normalizeWarehouseProduct));
+  if (Array.isArray(suppliers)) saveWarehouseSuppliersLocal(suppliers.map(normalizeWarehouseSupplier));
+  if (Array.isArray(balances))  saveWarehouseBalancesLocal(balances.map(normalizeWarehouseBalance));
+  if (Array.isArray(warehouses)) saveWarehousesLocal(warehouses.map(normalizeWarehouse));
   ensureCurrentWarehouseSelected();
 }
 
@@ -688,8 +692,6 @@ async function renderWarehouse() {
       <button class="btn btn-warning" onclick="openWarehouseAdjustmentModal()">⚖ Adjustment</button>
       <button class="btn btn-secondary" onclick="openWarehouseStockOutModal()">Stock Out / Requisition</button>
       ${warehouseList.length > 1 ? `<button class="btn btn-secondary" onclick="openWarehouseTransferModal()">⇄ Transfer</button>` : ''}
-      <button class="btn btn-secondary" onclick="openWarehouseCycleCountModal()">📋 Cycle Count</button>
-      <button class="btn btn-secondary" onclick="openWarehouseCsvModal()">⬆ Import CSV</button>
       <button class="btn btn-secondary" onclick="renderWarehouse()">↻ Refresh</button>
     </div>
 

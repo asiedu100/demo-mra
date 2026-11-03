@@ -121,6 +121,9 @@
     if (typeof setBranches === 'function') {
       setBranches(branches);
     }
+    if (typeof LS !== 'undefined') {
+      LS.set('branches', branches);
+    }
 
     return branches;
   }
@@ -253,6 +256,14 @@
 
     const myGeneration = authGeneration;
 
+    const cached = {
+      products: LS.get('lumoda_products') || [],
+      customers: LS.get('lumoda_customers') || [],
+      invoices: LS.get('lumoda_invoices') || [],
+      stockHistory: LS.get('lumoda_stockhistory') || [],
+      auditLogs: LS.get('lumoda_audit') || []
+    };
+
     const [
       products,
       customers,
@@ -261,11 +272,11 @@
       auditLogs,
       businessSettings
     ] = await Promise.all([
-      safeLoad(() => api.loadProducts()),
-      safeLoad(() => api.loadCustomers()),
-      safeLoad(() => api.loadInvoices()),
-      safeLoad(() => api.loadStockHistory()),
-      safeLoad(() => api.loadAuditLogs()),
+      safeLoad(() => api.loadProducts(), cached.products),
+      safeLoad(() => api.loadCustomers(), cached.customers),
+      safeLoad(() => api.loadInvoices(), cached.invoices),
+      safeLoad(() => api.loadStockHistory(), cached.stockHistory),
+      safeLoad(() => api.loadAuditLogs(), cached.auditLogs),
       safeLoad(() => api.loadBusinessSettings(), null)
     ]);
 
@@ -426,7 +437,6 @@
 
       // Remove data belonging to any previous user.
       clearUserScopedState();
-
       currentUser = await buildCurrentUser(profile);
       api.cacheSessionUser?.(currentUser);
 
@@ -522,6 +532,7 @@
 
   async function restoreSession() {
     const sb = getSupabaseClient();
+    const api = getAuthAPI();
 
     if (!sb) {
       showAuthScreen();
@@ -561,8 +572,6 @@
         return;
       }
 
-      clearUserScopedState();
-
       currentUser = await buildCurrentUser(profile);
       api.cacheSessionUser?.(currentUser);
 
@@ -600,6 +609,10 @@
       const cachedUser = api.getCachedSessionUser?.();
       if (cachedUser?.id && navigator.onLine === false) {
         currentUser = cachedUser;
+        const cachedBranches = typeof LS !== 'undefined' ? LS.get('branches') : [];
+        if (Array.isArray(cachedBranches) && typeof setBranches === 'function') {
+          setBranches(cachedBranches);
+        }
         currentLocation = currentUser.role === 'admin'
           ? 'All'
           : (currentUser.branchIds?.[0] || null);
@@ -630,6 +643,10 @@
         const cachedUser = api.getCachedSessionUser?.();
         if (cachedUser?.id) {
           currentUser = cachedUser;
+          const cachedBranches = typeof LS !== 'undefined' ? LS.get('branches') : [];
+          if (Array.isArray(cachedBranches) && typeof setBranches === 'function') {
+            setBranches(cachedBranches);
+          }
           currentLocation = currentUser.role === 'admin'
             ? 'All'
             : (currentUser.branchIds?.[0] || null);
@@ -1091,11 +1108,9 @@
       }
     });
 
-    // Hide only the unfinished dedicated warehouse-management and approvals
-    // pages. The branch-backed Warehouse page is supported by the demo schema.
+    // Hide only the unfinished dedicated warehouse-management page.
     [
-      'nav-warehouses',
-      'nav-approvals'
+      'nav-warehouses'
     ].forEach(id => {
       setDisplay(id, 'none');
     });
@@ -1121,7 +1136,7 @@
       }
 
       return items.filter(
-        item => item.branch_id === currentLocation
+        item => (item.branch_id || item.branchId) === currentLocation
       );
     }
 
@@ -1129,7 +1144,7 @@
     const assignedIds = currentUser.branchIds || [];
 
     return items.filter(
-      item => assignedIds.includes(item.branch_id)
+      item => assignedIds.includes(item.branch_id || item.branchId)
     );
   }
 

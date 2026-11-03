@@ -357,7 +357,7 @@ async function renderApprovals() {
   }
 
   container.innerHTML = rows.map(r => {
-    const who = escapeHtml((r.profiles && r.profiles.full_name) || 'Unknown staff') + ' · ' + escapeHtml((r.profiles && r.profiles.location) || '');
+    const who = escapeHtml((r.profiles && r.profiles.full_name) || 'Unknown staff');
     const when = fmtDateTime(new Date(r.requested_at).getTime());
 
     if (r.request_type === 'discount') {
@@ -388,7 +388,7 @@ async function renderApprovals() {
       '<div class="audit-dot" style="background:var(--brand-red)"></div>' +
       '<div style="flex:1">' +
         '<div style="font-size:13px"><span class="badge badge-danger">Item removal</span> ' +
-        'Invoice <strong>' + escapeHtml(inv.number || r.invoice_id) + '</strong> — ' + escapeHtml(inv.customer_name || '') +
+        'Invoice <strong>' + escapeHtml(inv.invoice_number || inv.number || r.invoice_id) + '</strong> — ' + escapeHtml(inv.customer_name || '') +
         '</div>' +
         '<div class="audit-meta" style="margin-bottom:4px">Proposed item list after the change:</div>' +
         itemsHtml +

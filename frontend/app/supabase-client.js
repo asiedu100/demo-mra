@@ -1371,8 +1371,8 @@
       .from('invoice_edit_requests')
       .select(`
         *,
-        profiles:requested_by (full_name, location),
-        invoices:invoice_id (number, customer_name)
+        profiles:requested_by (full_name),
+        invoices:invoice_id (invoice_number, customer_name)
       `)
       .eq('status', 'pending')
       .order('requested_at', { ascending: true });
@@ -1454,79 +1454,15 @@
       }
 
       const product = await resolveWarehouseProduct(item);
-      const { data: current, error: currentError } = await sb
-        .from('branch_inventory')
-        .select('id, quantity')
-        .eq('branch_id', branchId)
-        .eq('product_id', product.id)
-        .maybeSingle();
-      if (currentError) throw currentError;
-
-      const before = Number(current?.quantity || 0);
-      const delta = movementType === 'stock_out' || movementType === 'transfer'
-        ? -quantity
-        : quantity;
-      const after = before + delta;
-      if (after < 0) {
-        throw new Error(
-          `${product.product_name} has only ${before} available in this branch.`
-        );
-      }
-
-      const inventoryResult = current
-        ? await sb.from('branch_inventory')
-          .update({ quantity: after, updated_at: new Date().toISOString() })
-          .eq('id', current.id)
-          .select('id, quantity')
-          .single()
-        : await sb.from('branch_inventory')
-          .insert({ branch_id: branchId, product_id: product.id, quantity: after })
-          .select('id, quantity')
-          .single();
-      if (inventoryResult.error) throw inventoryResult.error;
-
-      const historyResult = await sb.from('stock_history').insert({
-        branch_id: branchId,
-        product_id: product.id,
-        movement_type: movementType,
-        quantity_change: delta,
-        quantity_before: before,
-        quantity_after: after,
-        reason: String(payload.notes || payload.description || 'Warehouse movement').trim() || null
-      }).select('id, created_at').single();
-      if (historyResult.error) throw historyResult.error;
-
-      if (movementType === 'transfer') {
-        if (!destinationId || destinationId === branchId) {
-          throw new Error('Choose a different destination branch for a transfer.');
-        }
-        const { data: destination, error: destinationError } = await sb
-          .from('branch_inventory')
-          .select('id, quantity')
-          .eq('branch_id', destinationId)
-          .eq('product_id', product.id)
-          .maybeSingle();
-        if (destinationError) throw destinationError;
-        const destinationBefore = Number(destination?.quantity || 0);
-        const destinationAfter = destinationBefore + quantity;
-        const destinationResult = destination
-          ? await sb.from('branch_inventory')
-            .update({ quantity: destinationAfter, updated_at: new Date().toISOString() })
-            .eq('id', destination.id)
-          : await sb.from('branch_inventory')
-            .insert({ branch_id: destinationId, product_id: product.id, quantity: destinationAfter });
-        if (destinationResult.error) throw destinationResult.error;
-        const destinationHistory = await sb.from('stock_history').insert({
-          branch_id: destinationId,
-          product_id: product.id,
-          movement_type: 'transfer',
-          quantity_change: quantity,
-          quantity_before: destinationBefore,
-          quantity_after: destinationAfter,
-          reason: String(payload.notes || 'Warehouse transfer').trim() || null
-        });
-        if (destinationHistory.error) throw destinationHistory.error;
-      }
+      const { error: movementError } = await sb.rpc('mra_record_stock_movement', {
+        p_branch_id: branchId,
+        p_product_id: product.id,
+        p_quantity: quantity,
+        p_movement_type: movementType,
+        p_reason: String(payload.notes || payload.description || 'Warehouse movement').trim() || null,
+        p_destination_branch_id: movementType === 'transfer' ? destinationId : null
+      });
+      if (movementError) throw movementError;
 
       processed.push({
         itemCode: product.sku || '',

@@ -17,6 +17,21 @@ function updateOfflineBadge() {
 window.addEventListener('online', updateOfflineBadge);
 window.addEventListener('offline', updateOfflineBadge);
 
+window.addEventListener('online', () => {
+  if (typeof currentUser !== 'undefined' && currentUser &&
+      typeof syncSupabaseCache === 'function') {
+    syncSupabaseCache()
+      .then(() => {
+      const activePage = document.querySelector('.page.active');
+      if (activePage && typeof renderPage === 'function') {
+        renderPage(activePage.id.replace('page-', ''));
+      }
+        if (typeof toast === 'function') toast('Connection restored. Data refreshed.', 'success');
+      })
+      .catch(error => console.warn('Online data refresh failed:', error));
+  }
+});
+
 updateOfflineBadge();
 
 
