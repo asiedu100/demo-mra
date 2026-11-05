@@ -558,7 +558,7 @@ function renderPage(page) {
     invoices: renderInvoices,
     customers: renderCustomers,
     products: renderProducts,
-    warehouse: renderWarehouse,
+    warehouse: typeof renderWarehouse === 'function' ? renderWarehouse : null,
     stockhistory: renderStockHistory,
     reports: renderReports,
     audit: renderAuditLog,
@@ -792,7 +792,7 @@ function applyBrandColor(hex) {
 }
 
 function getLogoUrl() {
-  return '../MRA.png?v=2';
+  return 'icons/mra-logo.png?v=3';
 }
 
 function applyLogo(url) {
