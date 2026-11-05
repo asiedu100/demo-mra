@@ -792,7 +792,7 @@ function applyBrandColor(hex) {
 }
 
 function getLogoUrl() {
-  return 'icons/mra-logo.png?v=3';
+  return 'icons/mra-logo.jpg?v=6';
 }
 
 function applyLogo(url) {
